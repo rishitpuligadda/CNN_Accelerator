@@ -18,11 +18,6 @@ module ram_1rw1r #(
 	input  [$clog2(DEPTH)-1:0]  addr1,
 	output [31:0]               rdata1
 );
-	localparam AW    = $clog2(DEPTH);
-	localparam MAW   = 9;
-	localparam NBANK = DEPTH / 512;
-	localparam BW    = AW - MAW;
-
 `ifndef SYNTHESIS
 	initial begin
 		if (DEPTH < 512 || DEPTH % 512 != 0) begin
@@ -33,6 +28,11 @@ module ram_1rw1r #(
 `endif
 
 `ifdef USE_SRAM_MACRO
+	localparam AW    = $clog2(DEPTH);
+	localparam MAW   = 9;
+	localparam NBANK = DEPTH / 512;
+	localparam BW    = AW - MAW;
+
 	wire [NBANK*32-1:0] dout0_all, dout1_all;
 
 	genvar b;
