@@ -70,7 +70,7 @@ module systolic_array #(
 			for (r = 0; r < TILE_MAX; r = r + 1)
 				if (pe_done[r*TILE_MAX + cl]) begin
 					c_col[cl*ACC_W +: ACC_W] = c_col[cl*ACC_W +: ACC_W] | result[r][cl];
-					c_row[cl*ROW_W +: ROW_W] = r;
+					c_row[cl*ROW_W +: ROW_W] = r[ROW_W-1:0];
 					c_valid[cl] = 1'b1;
 				end
 	end
