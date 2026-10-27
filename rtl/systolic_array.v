@@ -20,16 +20,13 @@ module systolic_array #(
 	wire signed [WIDTH-1:0] east   [0:TILE_MAX-1][0:TILE_MAX-1];
 	wire signed [ACC_W-1:0] result [0:TILE_MAX-1][0:TILE_MAX-1];
 	wire        [NDIAG-1:0] en_d;
-	wire                    rst_n_sync;
 	reg         [NDIAG-1:1] en_pipe;
-
-	reset_sync RST_SYNC (.rst_sync(rst_n_sync), .rst_async(rst_n), .clk(clk));
 
 	assign en_d = {en_pipe, en};
 	assign done = pe_done[TILE_MAX*TILE_MAX-1];
 
-	always @(posedge clk or negedge rst_n_sync) begin
-		if (!rst_n_sync) en_pipe <= {(NDIAG-1){1'b0}};
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n) en_pipe <= {(NDIAG-1){1'b0}};
 		else             en_pipe <= en_d[NDIAG-2:0];
 	end
 
@@ -52,7 +49,7 @@ module systolic_array #(
 				end
 
 				Processing_Element #(.WIDTH(WIDTH)) PE (
-					.clk(clk), .rst_n(rst_n_sync), .en(en_d[i+j]),
+					.clk(clk), .rst_n(rst_n), .en(en_d[i+j]),
 					.N(n_in), .W(w_in), .E(east[i][j]), .S(south[i][j]),
 					.result(result[i][j]),
 					.done(pe_done[i*TILE_MAX + j])

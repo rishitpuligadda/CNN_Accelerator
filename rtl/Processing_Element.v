@@ -6,18 +6,16 @@ module Processing_Element #(
 	output reg                      done,
 	input      signed [WIDTH-1:0]   N, W,
 	input                           clk, rst_n,
-	input                           en
+	input                           en,
+	input                           first,
+	input                           last
 );
 	wire signed [2*WIDTH-1:0] prod;
 	wire signed [4*WIDTH-1:0] prod_ext;
-	wire                      start, finish;
 	reg  signed [4*WIDTH-1:0] acc;
-	reg                       en_q;
 
 	assign prod     = N * W;
 	assign prod_ext = {{(2*WIDTH){prod[2*WIDTH-1]}}, prod};
-	assign start    = en & ~en_q;
-	assign finish   = ~en & en_q;
 	assign result   = acc;
 
 	always @(posedge clk or negedge rst_n) begin
@@ -25,14 +23,12 @@ module Processing_Element #(
 			acc  <= {4*WIDTH{1'b0}};
 			E    <= {WIDTH{1'b0}};
 			S    <= {WIDTH{1'b0}};
-			en_q <= 1'b0;
 			done <= 1'b0;
 		end
 		else begin
-			en_q <= en;
-			done <= finish;
+			done <= en && last;
 			if (en) begin
-				if (start) acc <= prod_ext;
+				if (first) acc <= prod_ext;
 				else       acc <= acc + prod_ext;
 				E <= W;
 				S <= N;
