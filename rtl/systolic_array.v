@@ -5,12 +5,12 @@ module systolic_array #(
 	output reg signed [TILE_MAX*4*WIDTH-1:0]          c_col,
 	output reg        [TILE_MAX*$clog2(TILE_MAX)-1:0] c_row,
 	output reg        [TILE_MAX-1:0]                  c_valid,
-	output            [TILE_MAX*TILE_MAX-1:0]         pe_done,
-	output                                            done,
 	input  signed     [TILE_MAX*WIDTH-1:0]            a,
 	input  signed     [TILE_MAX*WIDTH-1:0]            b,
 	input                                             clk, rst_n,
-	input                                             en
+	input                                             en,
+	input                                             first,
+	input                                             last
 );
 	localparam ACC_W = 4*WIDTH;
 	localparam ROW_W = $clog2(TILE_MAX);
@@ -19,15 +19,25 @@ module systolic_array #(
 	wire signed [WIDTH-1:0] south  [0:TILE_MAX-1][0:TILE_MAX-1];
 	wire signed [WIDTH-1:0] east   [0:TILE_MAX-1][0:TILE_MAX-1];
 	wire signed [ACC_W-1:0] result [0:TILE_MAX-1][0:TILE_MAX-1];
-	wire        [NDIAG-1:0] en_d;
-	reg         [NDIAG-1:1] en_pipe;
+	wire        [TILE_MAX*TILE_MAX-1:0] pe_done;
+	wire        [NDIAG-1:0] en_d, first_d, last_d;
+	reg         [NDIAG-1:1] en_pipe, first_pipe, last_pipe;
 
-	assign en_d = {en_pipe, en};
-	assign done = pe_done[TILE_MAX*TILE_MAX-1];
+	assign en_d    = {en_pipe, en};
+	assign first_d = {first_pipe, first};
+	assign last_d  = {last_pipe, last};
 
 	always @(posedge clk or negedge rst_n) begin
-		if (!rst_n) en_pipe <= {(NDIAG-1){1'b0}};
-		else             en_pipe <= en_d[NDIAG-2:0];
+		if (!rst_n) begin
+			en_pipe    <= {(NDIAG-1){1'b0}};
+			first_pipe <= {(NDIAG-1){1'b0}};
+			last_pipe  <= {(NDIAG-1){1'b0}};
+		end
+		else begin
+			en_pipe    <= en_d[NDIAG-2:0];
+			first_pipe <= first_d[NDIAG-2:0];
+			last_pipe  <= last_d[NDIAG-2:0];
+		end
 	end
 
 	genvar i, j;
@@ -49,7 +59,8 @@ module systolic_array #(
 				end
 
 				Processing_Element #(.WIDTH(WIDTH)) PE (
-					.clk(clk), .rst_n(rst_n), .en(en_d[i+j]),
+					.clk(clk), .rst_n(rst_n),
+					.en(en_d[i+j]), .first(first_d[i+j]), .last(last_d[i+j]),
 					.N(n_in), .W(w_in), .E(east[i][j]), .S(south[i][j]),
 					.result(result[i][j]),
 					.done(pe_done[i*TILE_MAX + j])
@@ -58,17 +69,34 @@ module systolic_array #(
 		end
 	endgenerate
 
+	reg signed [TILE_MAX*ACC_W-1:0] col_n;
+	reg        [TILE_MAX*ROW_W-1:0] row_n;
+	reg        [TILE_MAX-1:0]       val_n;
 	integer r, cl;
+
 	always @* begin
-		c_col   = {(TILE_MAX*ACC_W){1'b0}};
-		c_row   = {(TILE_MAX*ROW_W){1'b0}};
-		c_valid = {TILE_MAX{1'b0}};
+		col_n = {(TILE_MAX*ACC_W){1'b0}};
+		row_n = {(TILE_MAX*ROW_W){1'b0}};
+		val_n = {TILE_MAX{1'b0}};
 		for (cl = 0; cl < TILE_MAX; cl = cl + 1)
 			for (r = 0; r < TILE_MAX; r = r + 1)
 				if (pe_done[r*TILE_MAX + cl]) begin
-					c_col[cl*ACC_W +: ACC_W] = c_col[cl*ACC_W +: ACC_W] | result[r][cl];
-					c_row[cl*ROW_W +: ROW_W] = r[ROW_W-1:0];
-					c_valid[cl] = 1'b1;
+					col_n[cl*ACC_W +: ACC_W] = col_n[cl*ACC_W +: ACC_W] | result[r][cl];
+					row_n[cl*ROW_W +: ROW_W] = r[ROW_W-1:0];
+					val_n[cl] = 1'b1;
 				end
+	end
+
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n) begin
+			c_col   <= {(TILE_MAX*ACC_W){1'b0}};
+			c_row   <= {(TILE_MAX*ROW_W){1'b0}};
+			c_valid <= {TILE_MAX{1'b0}};
+		end
+		else begin
+			c_col   <= col_n;
+			c_row   <= row_n;
+			c_valid <= val_n;
+		end
 	end
 endmodule
