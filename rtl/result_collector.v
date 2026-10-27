@@ -23,7 +23,7 @@ module result_collector #(
 );
 	localparam RW = $clog2(N);
 	localparam QW = $clog2(QD);
-	localparam [RW-1:0] LAST = RW'(N - 1);
+	localparam integer LASTI = N - 1;
 
 	reg  [ADDR-1:0]      q_addr  [0:QD-1];
 	reg  [N-1:0]         q_lanes [0:QD-1];
@@ -38,6 +38,7 @@ module result_collector #(
 	wire [N-1:0]         fin;
 	wire [N-1:0]         is_last;
 	wire [N*ACC_W-1:0]   word   [0:N-1];
+	wire [N*ADDR-1:0]    pmul;
 	reg  [N*ACC_W-1:0]   sel_data;
 	reg  [ADDR-1:0]      sel_addr;
 	reg                  sel_en, sel_last;
@@ -52,7 +53,16 @@ module result_collector #(
 			reg [(N-1)*ACC_W-1:0] hold;
 			wire [RW-1:0]         row = c_row[j*RW +: RW];
 
-			assign fin[j]  = c_valid[j] && (row == LAST);
+			reg [ADDR-1:0] pm;
+
+			always @(posedge clk or negedge rst_n) begin
+				if (!rst_n) pm <= {ADDR{1'b0}};
+				else        pm <= ch_pitch * j;
+			end
+
+			assign pmul[j*ADDR +: ADDR] = pm;
+
+			assign fin[j]  = c_valid[j] && (row == LASTI[RW-1:0]);
 			assign word[j] = {c_col[j*ACC_W +: ACC_W], hold};
 
 			if (j == N-1) begin : TOP
@@ -65,7 +75,7 @@ module result_collector #(
 			always @(posedge clk or negedge rst_n) begin
 				if (!rst_n)
 					hold <= {((N-1)*ACC_W){1'b0}};
-				else if (c_valid[j] && row != LAST)
+				else if (c_valid[j] && row != LASTI[RW-1:0])
 					hold[row*ACC_W +: ACC_W] <= c_col[j*ACC_W +: ACC_W];
 			end
 		end
@@ -79,7 +89,7 @@ module result_collector #(
 		for (jj = 0; jj < N; jj = jj + 1) begin
 			if (fin[jj]) begin
 				sel_data = sel_data | word[jj];
-				sel_addr = sel_addr | (h_addr + jj[ADDR-1:0] * ch_pitch);
+				sel_addr = sel_addr | (h_addr + pmul[jj*ADDR +: ADDR]);
 				sel_en   = sel_en   | h_cols[jj];
 				sel_last = sel_last | is_last[jj];
 			end
