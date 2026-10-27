@@ -4,25 +4,20 @@ module tb_accel_top;
 	localparam EAW    = 16;
 	localparam N      = 4;
 	localparam ADDR   = 11;
-	localparam DIMW   = 8;
 	localparam EWORDS = 1 << EAW;
 	localparam IMG_EB = 0;
 	localparam WGT_EB = 16384;
 	localparam QMAX   = 65536;
 	localparam SQ     = 32;
+	localparam KQ     = 49;
 
 	reg                     clk, rst_n, start;
-	wire                    busy, done;
+	wire                    busy, done, err_valid;
+	wire [6:0]              err;
 	reg  [EAW-1:0]          img_ext_base, wgt_ext_base;
-	reg  [ADDR:0]           img_words;
-	reg  [10:0]             m;
-	reg  [7:0]              n_groups, c_max;
-	reg  [3:0]              last_cols;
-	reg  [DIMW-1:0]         in_h, in_w, out_h, out_w;
-	reg  [2:0]              kh_max, kw_max, pad;
-	reg  signed [ADDR+2:0]  step_kh, step_c, tile_addr0;
-	reg  [ADDR+1:0]         act_rp;
-	reg  [ADDR-1:0]         out_base, out_rp_w, out_ch_pitch;
+	reg  [7:0]              in_h, in_w, in_c, n_filt;
+	reg  [2:0]              k_h, k_w, pad, stride;
+	reg  [ADDR-1:0]         out_base;
 
 	wire                    rd_req_valid, rd_req_ready, rd_resp_valid, rd_resp_ready;
 	wire [EAW-1:0]          rd_req_addr;
@@ -34,10 +29,10 @@ module tb_accel_top;
 
 	reg  [31:0]             ext_mem [0:EWORDS-1];
 	integer                 img  [0:16*SQ*SQ-1];
-	integer                 wt   [0:16*16*49-1];
-	integer                 refo [0:16*SQ*SQ-1];
-	integer                 got  [0:16*SQ*SQ-1];
-	integer                 hw   [0:16*SQ*SQ-1];
+	integer                 wt   [0:64*16*KQ-1];
+	integer                 refo [0:64*SQ*SQ-1];
+	integer                 got  [0:64*SQ*SQ-1];
+	integer                 hw   [0:64*SQ*SQ-1];
 
 	reg  [N*32-1:0]         e_data [0:QMAX-1];
 	reg  [ADDR-1:0]         e_addr [0:QMAX-1];
@@ -52,17 +47,15 @@ module tb_accel_top;
 	wire                    req_fire  = rd_req_valid && rd_req_ready;
 	wire                    resp_fire = rd_resp_valid && rd_resp_ready;
 
-	integer L_F, L_RP, L_CH, L_OH, L_OW, L_M, L_G, L_ORP, L_OCH;
-	integer errors, layers, small_vals, fd;
+	integer L_H, L_W, L_C, L_F, L_KH, L_KW, L_P, L_S, L_RP, L_CH, L_OH, L_OW, L_M, L_G, L_ORP, L_OCH;
+	integer errors, layers, small_vals, fd, total_cycles, total_ideal;
 	reg [8*32:1] fname;
 
-	accel_top #(.EAW(EAW), .N(N), .ADDR(ADDR), .DIMW(DIMW)) dut (
-		.clk(clk), .rst_n(rst_n), .start(start), .busy(busy), .done(done),
-		.img_ext_base(img_ext_base), .img_words(img_words), .wgt_ext_base(wgt_ext_base),
-		.m(m), .n_groups(n_groups), .last_cols(last_cols),
-		.in_h(in_h), .in_w(in_w), .kh_max(kh_max), .kw_max(kw_max), .c_max(c_max), .pad(pad),
-		.step_kh(step_kh), .step_c(step_c), .tile_addr0(tile_addr0), .act_rp(act_rp),
-		.out_h(out_h), .out_w(out_w), .out_base(out_base), .out_rp_w(out_rp_w), .out_ch_pitch(out_ch_pitch),
+	accel_top #(.EAW(EAW), .N(N), .ADDR(ADDR)) dut (
+		.clk(clk), .rst_n(rst_n), .start(start), .busy(busy), .done(done), .err_valid(err_valid), .err(err),
+		.img_ext_base(img_ext_base), .wgt_ext_base(wgt_ext_base),
+		.in_h(in_h), .in_w(in_w), .in_c(in_c), .n_filt(n_filt),
+		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .out_base(out_base),
 		.rd_req_valid(rd_req_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(rd_req_addr),
 		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(rd_resp_ready),
 		.pkt_valid(pkt_valid), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last)
@@ -86,19 +79,23 @@ module tb_accel_top;
 			sq_count <= 0;
 		end
 		else begin
-		if (req_fire) begin
-			q_addr[sq_tail] <= rd_req_addr;
-			q_due[sq_tail]  <= cyc + lat_min + ({$random} % (lat_max - lat_min + 1));
-			sq_tail         <= (sq_tail + 1) % 32;
-		end
-		if (resp_fire) sq_head <= (sq_head + 1) % 32;
-		if (req_fire && !resp_fire)      sq_count <= sq_count + 1;
-		else if (!req_fire && resp_fire) sq_count <= sq_count - 1;
+			if (req_fire) begin
+				q_addr[sq_tail] <= rd_req_addr;
+				q_due[sq_tail]  <= cyc + lat_min + ({$random} % (lat_max - lat_min + 1));
+				sq_tail         <= (sq_tail + 1) % 32;
+			end
+			if (resp_fire) sq_head <= (sq_head + 1) % 32;
+			if (req_fire && !resp_fire)      sq_count <= sq_count + 1;
+			else if (!req_fire && resp_fire) sq_count <= sq_count - 1;
 		end
 	end
 
 	function integer oidx(input integer f, input integer y, input integer x);
 		oidx = f * SQ * SQ + y * SQ + x;
+	endfunction
+
+	function integer widx(input integer f, input integer kk);
+		widx = f * 16 * KQ + kk;
 	endfunction
 
 	always @(negedge clk) begin
@@ -142,32 +139,11 @@ module tb_accel_top;
 		end
 	endtask
 
-
-	task print_input(input integer h, input integer w, input integer ch, input integer maxc);
-		integer c, y, x;
+	task source(input integer lmin, input integer lmax, input integer rpct);
 		begin
-			for (c = 0; c < ch && c < maxc; c = c + 1) begin
-				$display("    input channel %0d:", c);
-				for (y = 0; y < h; y = y + 1) begin
-					$write("      ");
-					for (x = 0; x < w; x = x + 1) $write("%5d", img[c * SQ * SQ + y * SQ + x]);
-					$display("");
-				end
-			end
-		end
-	endtask
-
-	task print_weights(input integer f, input integer ch, input integer k);
-		integer c, kh, kw;
-		begin
-			for (c = 0; c < ch; c = c + 1) begin
-				$display("    filter %0d, channel %0d weights:", f, c);
-				for (kh = 0; kh < k; kh = kh + 1) begin
-					$write("      ");
-					for (kw = 0; kw < k; kw = kw + 1) $write("%5d", wt[f * 16 * 49 + c * k * k + kh * k + kw]);
-					$display("");
-				end
-			end
+			lat_min = lmin;
+			lat_max = lmax;
+			rdy_pct = rpct;
 		end
 	endtask
 
@@ -189,19 +165,41 @@ module tb_accel_top;
 		end
 	endtask
 
-	task explain_one(input integer f, input integer oh, input integer ow, input integer k, input integer p, input integer h, input integer w);
+	task print_small;
+		integer y, x, f, kh, kw;
+		begin
+			$display("    input channel 0:");
+			for (y = 0; y < L_H; y = y + 1) begin
+				$write("      ");
+				for (x = 0; x < L_W; x = x + 1) $write("%5d", img[y * SQ + x]);
+				$display("");
+			end
+			for (f = 0; f < L_F; f = f + 1) begin
+				$display("    filter %0d weights:", f);
+				for (kh = 0; kh < L_KH; kh = kh + 1) begin
+					$write("      ");
+					for (kw = 0; kw < L_KW; kw = kw + 1) $write("%5d", wt[widx(f, kh * L_KW + kw)]);
+					$display("");
+				end
+			end
+			for (f = 0; f < L_F; f = f + 1) print_outputs(f, L_OH, L_OW);
+		end
+	endtask
+
+	task explain_one(input integer f, input integer oh, input integer ow);
 		integer kh, kw, y, x, v, sum;
 		begin
-			$display("    by hand: filter %0d output at (%0d,%0d) = sum of patch x weights", f, oh, ow);
+			$display("    by hand: filter %0d output at (%0d,%0d) uses input rows %0d.. and columns %0d.. (stride %0d)",
+			         f, oh, ow, oh * L_S - L_P, ow * L_S - L_P, L_S);
 			sum = 0;
-			for (kh = 0; kh < k; kh = kh + 1) begin
+			for (kh = 0; kh < L_KH; kh = kh + 1) begin
 				$write("      ");
-				for (kw = 0; kw < k; kw = kw + 1) begin
-					y = oh + kh - p;
-					x = ow + kw - p;
-					v = (y >= 0 && y < h && x >= 0 && x < w) ? img[y * SQ + x] : 0;
-					sum = sum + v * wt[f * 16 * 49 + kh * k + kw];
-					$write("  %2d x %2d", v, wt[f * 16 * 49 + kh * k + kw]);
+				for (kw = 0; kw < L_KW; kw = kw + 1) begin
+					y = oh * L_S + kh - L_P;
+					x = ow * L_S + kw - L_P;
+					v = (y >= 0 && y < L_H && x >= 0 && x < L_W) ? img[y * SQ + x] : 0;
+					sum = sum + v * wt[widx(f, kh * L_KW + kw)];
+					$write("  %2d x %2d", v, wt[widx(f, kh * L_KW + kw)]);
 				end
 				$display("");
 			end
@@ -209,31 +207,30 @@ module tb_accel_top;
 		end
 	endtask
 
-	task dump_layer(input integer h, input integer w, input integer ch, input integer nf, input integer k, input integer p);
-		integer c, y, x, f, kh, kw;
+	task dump_layer;
+		integer c, y, x, f, kk;
 		begin
 			$sformat(fname, "layer%0d_outputs.txt", layers + 1);
 			fd = $fopen(fname, "w");
-			$fdisplay(fd, "layer %0d: %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d -> %0dx%0dx%0d output",
-			          layers + 1, h, w, ch, nf, k, k, p, L_OH, L_OW, nf);
-			for (c = 0; c < ch; c = c + 1) begin
+			$fdisplay(fd, "layer %0d: %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d, stride %0d -> %0dx%0dx%0d output",
+			          layers + 1, L_H, L_W, L_C, L_F, L_KH, L_KW, L_P, L_S, L_OH, L_OW, L_F);
+			for (c = 0; c < L_C; c = c + 1) begin
 				$fdisplay(fd, "");
 				$fdisplay(fd, "input channel %0d", c);
-				for (y = 0; y < h; y = y + 1) begin
-					for (x = 0; x < w; x = x + 1) $fwrite(fd, "%5d", img[c * SQ * SQ + y * SQ + x]);
+				for (y = 0; y < L_H; y = y + 1) begin
+					for (x = 0; x < L_W; x = x + 1) $fwrite(fd, "%5d", img[c * SQ * SQ + y * SQ + x]);
 					$fdisplay(fd, "");
 				end
 			end
-			for (f = 0; f < nf; f = f + 1)
-				for (c = 0; c < ch; c = c + 1) begin
-					$fdisplay(fd, "");
-					$fdisplay(fd, "filter %0d channel %0d weights", f, c);
-					for (kh = 0; kh < k; kh = kh + 1) begin
-						for (kw = 0; kw < k; kw = kw + 1) $fwrite(fd, "%5d", wt[f * 16 * 49 + c * k * k + kh * k + kw]);
-						$fdisplay(fd, "");
-					end
+			for (f = 0; f < L_F; f = f + 1) begin
+				$fdisplay(fd, "");
+				$fdisplay(fd, "filter %0d weights, k = c*(kh*kw) + kh*kw_size + kw", f);
+				for (kk = 0; kk < L_M; kk = kk + 1) begin
+					$fwrite(fd, "%5d", wt[widx(f, kk)]);
+					if (kk % L_KW == L_KW - 1) $fdisplay(fd, "");
 				end
-			for (f = 0; f < nf; f = f + 1) begin
+			end
+			for (f = 0; f < L_F; f = f + 1) begin
 				$fdisplay(fd, "");
 				$fdisplay(fd, "filter %0d output: hardware", f);
 				for (y = 0; y < L_OH; y = y + 1) begin
@@ -250,25 +247,17 @@ module tb_accel_top;
 		end
 	endtask
 
-	task source(input integer lmin, input integer lmax, input integer rpct);
-		begin
-			lat_min = lmin;
-			lat_max = lmax;
-			rdy_pct = rpct;
-		end
-	endtask
-
-	task layer(input integer h, input integer w, input integer ch, input integer nf, input integer k, input integer p);
+	task layer(input integer h, input integer w, input integer ch, input integer nf,
+	           input integer kh_, input integer kw_, input integer p, input integer s);
 		integer b, c, y, x, f, kh, kw, kk, g, j, i, sum, nbytes, word, top, ow, oh;
-		reg [3:0] cols;
 		reg [N*32-1:0] pk;
 		begin
-			L_F = nf;
+			L_H = h; L_W = w; L_C = ch; L_F = nf; L_KH = kh_; L_KW = kw_; L_P = p; L_S = s;
 			L_RP  = ((w + 3) / 4) * 4;
 			L_CH  = h * L_RP;
-			L_OH  = h + 2 * p - k + 1;
-			L_OW  = w + 2 * p - k + 1;
-			L_M   = ch * k * k;
+			L_OH  = (h + 2 * p - kh_) / s + 1;
+			L_OW  = (w + 2 * p - kw_) / s + 1;
+			L_M   = ch * kh_ * kw_;
 			L_G   = (nf + 3) / 4;
 			L_ORP = (L_OW + 3) / 4;
 			L_OCH = L_OH * L_ORP;
@@ -281,8 +270,8 @@ module tb_accel_top;
 						else                 img[c * SQ * SQ + y * SQ + x] = $random % 128;
 			for (f = 0; f < nf; f = f + 1)
 				for (kk = 0; kk < L_M; kk = kk + 1)
-					if (small_vals != 0) wt[f * 16 * 49 + kk] = ({$random} % 3) - 1;
-					else                 wt[f * 16 * 49 + kk] = $random % 128;
+					if (small_vals != 0) wt[widx(f, kk)] = ({$random} % 3) - 1;
+					else                 wt[widx(f, kk)] = $random % 128;
 
 			for (word = 0; word < (nbytes + 3) / 4; word = word + 1)
 				ext_mem[IMG_EB + word] = $random;
@@ -296,7 +285,7 @@ module tb_accel_top;
 			for (g = 0; g < L_G; g = g + 1)
 				for (kk = 0; kk < L_M; kk = kk + 1)
 					for (j = 0; j < 4; j = j + 1)
-						if (4 * g + j < nf) ext_mem[WGT_EB + g * L_M + kk][j * 8 +: 8] = 8'(wt[(4 * g + j) * 16 * 49 + kk]);
+						if (4 * g + j < nf) ext_mem[WGT_EB + g * L_M + kk][j * 8 +: 8] = 8'(wt[widx(4 * g + j, kk)]);
 						else                ext_mem[WGT_EB + g * L_M + kk][j * 8 +: 8] = 8'h00;
 
 			for (f = 0; f < nf; f = f + 1)
@@ -304,18 +293,18 @@ module tb_accel_top;
 					for (ow = 0; ow < L_OW; ow = ow + 1) begin
 						sum = 0;
 						for (c = 0; c < ch; c = c + 1)
-							for (kh = 0; kh < k; kh = kh + 1)
-								for (kw = 0; kw < k; kw = kw + 1) begin
-									y = oh + kh - p;
-									x = ow + kw - p;
+							for (kh = 0; kh < kh_; kh = kh + 1)
+								for (kw = 0; kw < kw_; kw = kw + 1) begin
+									y = oh * s + kh - p;
+									x = ow * s + kw - p;
 									if (y >= 0 && y < h && x >= 0 && x < w)
-										sum = sum + img[c * SQ * SQ + y * SQ + x] * wt[f * 16 * 49 + c * k * k + kh * k + kw];
+										sum = sum + img[c * SQ * SQ + y * SQ + x] * wt[widx(f, c * kh_ * kw_ + kh * kw_ + kw)];
 								end
 						refo[oidx(f, oh, ow)] = sum;
 						got[oidx(f, oh, ow)]  = 0;
+						hw[oidx(f, oh, ow)]   = 0;
 					end
 
-			cols = (nf % 4 == 0) ? 4'hF : 4'((1 << (nf % 4)) - 1);
 			for (g = 0; g < L_G; g = g + 1)
 				for (oh = 0; oh < L_OH; oh = oh + 1)
 					for (ow = 0; ow < L_OW; ow = ow + 4) begin
@@ -332,54 +321,52 @@ module tb_accel_top;
 					end
 
 			img_ext_base = IMG_EB;
-			img_words    = (ADDR+1)'((nbytes + 3) / 4);
 			wgt_ext_base = WGT_EB;
-			m            = 11'(L_M);
-			n_groups     = 8'(L_G);
-			last_cols    = cols;
-			in_h         = DIMW'(h);
-			in_w         = DIMW'(w);
-			kh_max       = 3'(k - 1);
-			kw_max       = 3'(k - 1);
-			c_max        = 8'(ch - 1);
-			pad          = 3'(p);
-			step_kh      = (ADDR+3)'(L_RP - (k - 1));
-			step_c       = (ADDR+3)'(L_CH - (k - 1) * L_RP - (k - 1));
-			tile_addr0   = (ADDR+3)'(4 - p * L_RP - p);
-			act_rp       = (ADDR+2)'(L_RP);
-			out_h        = DIMW'(L_OH);
-			out_w        = DIMW'(L_OW);
-			out_base     = 11'd1;
-			out_rp_w     = ADDR'(L_ORP);
-			out_ch_pitch = ADDR'(L_OCH);
+			in_h   = 8'(h);
+			in_w   = 8'(w);
+			in_c   = 8'(ch);
+			n_filt = 8'(nf);
+			k_h    = 3'(kh_);
+			k_w    = 3'(kw_);
+			pad    = 3'(p);
+			stride = 3'(s);
+			out_base = 11'd1;
 		end
 	endtask
 
-	task run(input integer h, input integer w, input integer ch, input integer nf, input integer k, input integer p);
-		integer t0, p0, e0, f, y, x, missing, tiles, ideal, img_w;
+	task pulse_start;
 		begin
-			layer(h, w, ch, nf, k, p);
-			p0 = pkts;
-			e0 = errors + mon_err;
-			$display("");
-			$write("  %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d -> %0dx%0dx%0d output   (M = %0d, %0d filter group(s)",
-			       h, w, ch, nf, k, k, p, L_OH, L_OW, nf, L_M, L_G);
-			if (L_M > 512) $display(", single weight buffer)");
-			else           $display(", double-buffered weights)");
 			@(negedge clk);
 			start = 1'b1;
-			t0 = cyc;
 			@(negedge clk);
 			start = 1'b0;
-			@(negedge clk);
-			if (!busy) begin
-				errors = errors + 1;
-				$display("FAIL: busy did not go high after start");
+		end
+	endtask
+
+	task run(input integer h, input integer w, input integer ch, input integer nf,
+	         input integer kh_, input integer kw_, input integer p, input integer s, input integer loud);
+		integer t0, p0, e0, f, y, x, missing, tiles, ideal;
+		begin
+			layer(h, w, ch, nf, kh_, kw_, p, s);
+			p0 = pkts;
+			e0 = errors + mon_err;
+			if (loud != 0) begin
+				$display("");
+				$write("  %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d, stride %0d -> %0dx%0dx%0d output (M = %0d, %0d group(s)",
+				       h, w, ch, nf, kh_, kw_, p, s, L_OH, L_OW, nf, L_M, L_G);
+				if (L_M > 512) $display(", single weight buffer)");
+				else           $display(")");
 			end
+			t0 = cyc;
+			pulse_start;
 			while (!done) begin
 				@(negedge clk);
 				if (pkt_valid) decode_pkt;
-				if (cyc - t0 > 400000) $fatal(1, "layer never finished");
+				if (cyc - t0 > 600000) $fatal(1, "layer never finished");
+			end
+			if (err_valid || err != 7'd0) begin
+				errors = errors + 1;
+				$display("FAIL: valid layer was rejected, err = %b", err);
 			end
 			repeat (2) @(negedge clk);
 			if (busy) begin
@@ -399,52 +386,76 @@ module tb_accel_top;
 
 			tiles = L_G * L_OH * ((L_OW + 3) / 4);
 			ideal = tiles * (L_M + 1);
-			img_w = (4 + ch * L_CH + 3) / 4;
-			$display("    finished in %0d cycles: image %0d words, weights %0d words, %0d tiles x (M+1) = %0d compute cycles",
-			         cyc - t0, img_w, L_G * L_M, tiles, ideal);
-			$display("    %0d packets, all %0d outputs compared with a reference convolution: %0d errors, %0d missing or duplicated",
-			         pkts - p0, nf * L_OH * L_OW, errors + mon_err - e0, missing);
-			if (small_vals != 0) begin
-				print_input(h, w, ch, 1);
-				for (f = 0; f < nf; f = f + 1) print_weights(f, ch, k);
-				for (f = 0; f < nf; f = f + 1) print_outputs(f, L_OH, L_OW);
-				explain_one(0, 0, 0, k, p, h, w);
-				explain_one(1, 2, 2, k, p, h, w);
+			total_cycles = total_cycles + (cyc - t0);
+			total_ideal  = total_ideal + ideal;
+			if (loud != 0) begin
+				$display("    %0d cycles (%0d tiles x (M+1) = %0d ideal compute), %0d packets, %0d outputs: %0d errors, %0d missing/duplicated",
+				         cyc - t0, tiles, ideal, pkts - p0, nf * L_OH * L_OW, errors + mon_err - e0, missing);
+				if (small_vals != 0) begin
+					print_small;
+					explain_one(0, 0, 0);
+					if (L_OH > 2 && L_OW > 2) explain_one(L_F - 1, 2, 2);
+				end
+				else if (L_OW >= 4) print_outputs(0, 2, 6);
+				else begin
+					$write("    hardware:");
+					for (f = 0; f < nf; f = f + 1) $write(" %0d", hw[oidx(f, 0, 0)]);
+					$display("");
+					$write("    reference:");
+					for (f = 0; f < nf; f = f + 1) $write(" %0d", refo[oidx(f, 0, 0)]);
+					$display("");
+				end
+				dump_layer;
+				$display("    full input, weights and outputs in %0s", fname);
 			end
-			else if (L_OW >= 4)
-				print_outputs(0, 3, 6);
-			else begin
-				$write("    outputs of all %0d filters (1x1 output each), hardware:", nf);
-				for (f = 0; f < nf; f = f + 1) $write(" %0d", hw[oidx(f, 0, 0)]);
-				$display("");
-				$write("                                              reference:");
-				for (f = 0; f < nf; f = f + 1) $write(" %0d", refo[oidx(f, 0, 0)]);
-				$display("");
-			end
-			dump_layer(h, w, ch, nf, k, p);
-			$display("    full input, weights and every output (hardware and reference) written to %0s", fname);
+			else
+				$display("    %0dx%0dx%0d, %0d filters %0dx%0d, pad %0d, stride %0d: %0d outputs, %0d errors",
+				         h, w, ch, nf, kh_, kw_, p, s, nf * L_OH * L_OW, errors + mon_err - e0 + missing);
 			layers = layers + 1;
 		end
 	endtask
+
+	task reject(input [7:0] h, input [7:0] w, input [7:0] ch, input [7:0] nf,
+	            input [2:0] kh_, input [2:0] kw_, input [2:0] p, input [2:0] s,
+	            input [10:0] obase, input integer bit_n, input [8*40:1] why);
+		integer t0, p0;
+		begin
+			in_h = h; in_w = w; in_c = ch; n_filt = nf;
+			k_h = kh_; k_w = kw_; pad = p; stride = s; out_base = obase;
+			p0 = pkts;
+			t0 = cyc;
+			pulse_start;
+			while (!done) begin
+				@(negedge clk);
+				if (cyc - t0 > 2000) $fatal(1, "rejected layer never reported");
+			end
+			if (err[bit_n] == 1'b1 && pkts == p0)
+				$display("    %0s: rejected with err = %b (bit %0d)   ok", why, err, bit_n);
+			else begin
+				errors = errors + 1;
+				$display("FAIL: %0s: err = %b, expected bit %0d, %0d packets", why, err, bit_n, pkts - p0);
+			end
+			repeat (2) @(negedge clk);
+		end
+	endtask
+
+	integer n, rh, rw, rc, rf, rkh, rkw, rp, rs;
 
 	initial begin
 		$dumpfile("accel_top.vcd");
 		$dumpvars(0, tb_accel_top);
 
-		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0;
+		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0;
 		sq_head = 0; sq_tail = 0; sq_count = 0; rdy_r = 1'b1; mem_on = 1'b0;
 		source(1, 1, 100);
 		start = 1'b0;
-		img_ext_base = 0; img_words = 0; wgt_ext_base = 0; m = 0; n_groups = 0; last_cols = 0;
-		in_h = 0; in_w = 0; kh_max = 0; kw_max = 0; c_max = 0; pad = 0;
-		step_kh = 0; step_c = 0; tile_addr0 = 0; act_rp = 0;
-		out_h = 0; out_w = 0; out_base = 0; out_rp_w = 0; out_ch_pitch = 0;
-		for (cyc = 0; cyc < 32; cyc = cyc + 1) begin
-			q_addr[cyc] = {EAW{1'b0}};
-			q_due[cyc]  = 0;
+		img_ext_base = 0; wgt_ext_base = 0; in_h = 0; in_w = 0; in_c = 0; n_filt = 0;
+		k_h = 0; k_w = 0; pad = 0; stride = 0; out_base = 0;
+		for (n = 0; n < 32; n = n + 1) begin
+			q_addr[n] = {EAW{1'b0}};
+			q_due[n]  = 0;
 		end
-		cyc = 0;
 
 `ifdef USE_SRAM_MACRO
 		$display("accel_top: full convolution layers, memories: sky130 macros");
@@ -459,33 +470,76 @@ module tb_accel_top;
 		mem_on = 1'b1;
 
 		$display("");
-		$display("0) A tiny layer with small numbers you can check by hand (inputs 0-9, weights -1..1):");
+		$display("0) Small numbers you can check by hand (inputs 0-9, weights -1..1):");
 		small_vals = 1;
-		run(5, 5, 1, 2, 3, 1);
+		run(5, 5, 1, 2, 3, 3, 1, 1, 1);
+		run(7, 7, 1, 1, 3, 3, 1, 2, 1);
 		small_vals = 0;
 
 		$display("");
-		$display("1) Ideal external memory (1-cycle latency, always ready):");
-		run(28, 28, 1, 8, 3, 1);
-		run(14, 14, 8, 16, 3, 1);
-		run(10, 10, 3, 6, 3, 0);
-		run(7, 7, 16, 10, 7, 0);
-		run(12, 12, 2, 4, 5, 2);
-		run(8, 8, 4, 5, 1, 0);
+		$display("1) Layer shapes from before, ideal memory:");
+		run(28, 28, 1, 8, 3, 3, 1, 1, 1);
+		run(14, 14, 8, 16, 3, 3, 1, 1, 1);
+		run(10, 10, 3, 6, 3, 3, 0, 1, 1);
+		run(7, 7, 16, 10, 7, 7, 0, 1, 1);
+		run(12, 12, 2, 4, 5, 5, 2, 1, 1);
 
 		$display("");
-		$display("2) Slow external memory (latency 1-6 cycles, accepts 60%% of requests):");
-		source(1, 6, 60);
-		run(14, 14, 8, 16, 3, 1);
-		run(7, 7, 16, 10, 7, 0);
+		$display("2) Stride 2, 3 and 4, uneven kernels, and the K = 1 and K = 2 cases (also with stride):");
+		run(14, 14, 4, 8, 3, 3, 1, 2, 1);
+		run(15, 15, 3, 6, 3, 3, 0, 2, 1);
+		run(16, 16, 2, 4, 3, 3, 1, 3, 1);
+		run(17, 17, 1, 4, 5, 5, 2, 4, 1);
+		run(12, 10, 2, 5, 3, 5, 1, 1, 1);
+		run(9, 11, 3, 3, 1, 3, 0, 2, 1);
+		run(8, 8, 1, 4, 1, 1, 0, 1, 1);
+		run(8, 8, 2, 5, 1, 1, 0, 1, 1);
+		run(9, 9, 1, 4, 1, 1, 0, 2, 1);
+		run(9, 11, 2, 4, 1, 1, 0, 2, 1);
+		run(13, 13, 1, 4, 1, 1, 0, 3, 1);
+
 		$display("");
-		$display("   one tile per group and an even slower memory (40%% accepted), so loading a group takes longer than computing one:");
+		$display("3) 25 random layer shapes:");
+		for (n = 0; n < 25; n = n + 1) begin
+			rkh = 1 + {$random} % 5;
+			rkw = 1 + {$random} % 5;
+			rp  = {$random} % 4;
+			if (rp >= rkh) rp = rkh - 1;
+			if (rp >= rkw) rp = rkw - 1;
+			rs  = 1 + {$random} % 4;
+			rh  = rkh + {$random} % 18;
+			rw  = rkw + {$random} % 18;
+			rc  = 1 + {$random} % 6;
+			rf  = 1 + {$random} % 9;
+			while (4 + rc * rh * ((rw + 3) / 4) * 4 > 6140) rc = rc - 1;
+			run(rh, rw, rc, rf, rkh, rkw, rp, rs, 0);
+		end
+
+		$display("");
+		$display("4) Slow external memory (latency 1-6, 60%% accepted), then a memory-bound layer (40%%):");
+		source(1, 6, 60);
+		run(14, 14, 8, 16, 3, 3, 1, 1, 1);
+		run(14, 14, 4, 8, 3, 3, 1, 2, 1);
 		source(1, 6, 40);
-		run(3, 6, 16, 12, 3, 0);
+		run(3, 6, 16, 12, 3, 3, 0, 1, 1);
+		source(1, 1, 100);
+
+		$display("");
+		$display("5) Invalid configurations must be rejected without running:");
+		reject(8, 8, 1, 4, 0, 3, 0, 1, 1, 0, "zero kernel height              ");
+		reject(8, 8, 1, 4, 3, 3, 0, 5, 1, 1, "stride 5                        ");
+		reject(8, 8, 1, 4, 3, 3, 3, 1, 1, 2, "padding as large as the kernel  ");
+		reject(2, 8, 1, 4, 5, 3, 0, 1, 1, 3, "kernel taller than the input    ");
+		reject(8, 8, 128, 4, 3, 3, 1, 1, 1, 4, "weights larger than 4 KB      ");
+		reject(32, 32, 8, 4, 3, 3, 1, 1, 1, 5, "image larger than 6 KB        ");
+		reject(28, 28, 1, 8, 3, 3, 1, 1, 1000, 6, "outputs past the address space");
+		$display("    and a valid layer still runs right after:");
+		run(10, 10, 3, 6, 3, 3, 0, 1, 0);
 
 		repeat (4) @(negedge clk);
 		$display("");
-		$display("3) Totals: %0d layers, %0d packets, %0d expected packets never arrived", layers, pkts, q_tail - q_head);
+		$display("6) Totals: %0d layers, %0d packets, %0d cycles against %0d ideal compute cycles, %0d expected packets missing",
+		         layers, pkts, total_cycles, total_ideal, q_tail - q_head);
 		if (q_head != q_tail) begin
 			errors = errors + 1;
 			$display("FAIL: %0d expected packets never arrived", q_tail - q_head);
@@ -494,7 +548,7 @@ module tb_accel_top;
 		$display("");
 
 		if (errors != 0) $fatal(1, "FAIL: %0d error(s)", errors);
-		$display("PASS: %0d convolution layers, every output matches the reference", layers);
+		$display("PASS: %0d convolution layers, every output matches the reference; all invalid configurations rejected", layers);
 		$finish;
 	end
 endmodule
