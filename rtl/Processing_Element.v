@@ -8,7 +8,8 @@ module Processing_Element #(
 	input                           clk, rst_n,
 	input                           en,
 	input                           first,
-	input                           last
+	input                           last,
+	input      signed [4*WIDTH-1:0] bias
 );
 	wire signed [2*WIDTH-1:0] prod;
 	wire signed [4*WIDTH-1:0] prod_ext;
@@ -28,8 +29,7 @@ module Processing_Element #(
 		else begin
 			done <= en && last;
 			if (en) begin
-				if (first) acc <= prod_ext;
-				else       acc <= acc + prod_ext;
+				acc <= (first ? bias : acc) + prod_ext;
 				E <= W;
 				S <= N;
 			end
