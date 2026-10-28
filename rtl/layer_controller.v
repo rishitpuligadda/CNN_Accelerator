@@ -1,7 +1,8 @@
 module layer_controller #(
     parameter EAW  = 16,
     parameter ADDR = 11,
-    parameter N    = 4
+    parameter N       = 4,
+    parameter CREDITS = 8
 ) (
     input                          clk,
     input                          rst_n,
@@ -44,6 +45,7 @@ module layer_controller #(
     output     [ADDR-1:0]          desc_addr,
     output     [3:0]               desc_cols,
     input                          desc_full,
+    input                          pkt_pop,
     input                          pkt_last,
 
     output                         bias_rd,
@@ -79,11 +81,15 @@ module layer_controller #(
 	reg  [ADDR-1:0]        o_grp_base, o_row_base;
 	reg  [15:0]            tiles_issued, tiles_done;
 	reg  [4:0]             fl_cnt;
+	reg  [5:0]             credits;
 	reg  [2:0]             bcnt;
 
 	localparam integer     NM1        = N - 1;
 	wire        [2:0]      need       = ({21'd0, m} >= NM1) ? 3'd0 : NM1[2:0] - m[2:0];
-	wire                   issue      = (state == S_ISSUE) && !act_busy && !desc_full && (since_end >= need);
+	wire        [2:0]      ncols      = {2'b00, desc_cols[0]} + {2'b00, desc_cols[1]} +
+	                                    {2'b00, desc_cols[2]} + {2'b00, desc_cols[3]};
+	wire                   issue      = (state == S_ISSUE) && !act_busy && !desc_full && (since_end >= need) &&
+	                                    (credits >= {3'b000, ncols});
 	wire                   last_ow    = ({1'b0, ow} + 9'd4) >= {1'b0, out_w};
 	wire                   last_oh    = (oh == out_h - 1'b1);
 	wire                   last_group = (g == n_groups - 1'b1);
@@ -142,6 +148,7 @@ module layer_controller #(
 			tiles_issued <= 16'd0;
 			tiles_done   <= 16'd0;
 			fl_cnt       <= 5'd0;
+			credits      <= CREDITS[5:0];
 			bcnt         <= 3'd0;
 			bias         <= {(N*32){1'b0}};
 		end
@@ -151,6 +158,7 @@ module layer_controller #(
 			if (dma_done) wpend <= 1'b0;
 			if (act_busy)               since_end <= 3'd0;
 			else if (since_end != 3'd7) since_end <= since_end + 1'b1;
+			credits <= credits - (issue ? {3'b000, ncols} : 6'd0) + {5'd0, pkt_pop};
 			if (issue)                  fl_cnt <= FLIGHT[4:0];
 			else if (fl_cnt != 5'd0)    fl_cnt <= fl_cnt - 1'b1;
 

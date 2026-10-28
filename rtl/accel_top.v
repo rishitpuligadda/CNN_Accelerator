@@ -2,7 +2,8 @@ module accel_top #(
     parameter EAW     = 16,
     parameter N       = 4,
     parameter ADDR    = 11,
-    parameter OUT_REG = 1
+    parameter OUT_REG = 1,
+    parameter PKT_Q   = 8
 ) (
 `ifdef USE_POWER_PINS
     inout                     vccd1,
@@ -36,6 +37,7 @@ module accel_top #(
     output                    rd_resp_ready,
 
     output                    pkt_valid,
+    input                     pkt_ready,
     output     [N*32-1:0]     pkt_data,
     output     [ADDR-1:0]     pkt_addr,
     output     [N-1:0]        pkt_be,
@@ -84,6 +86,12 @@ module accel_top #(
 	wire [N-1:0]            c_valid;
 
 	wire                    desc_push, desc_full;
+	wire                    col_valid, col_last;
+	wire [N*32-1:0]         col_data;
+	wire [ADDR-1:0]         col_addr;
+	wire [N-1:0]            col_be;
+	wire                    unused_fifo_full;
+	wire                    pkt_pop = pkt_valid && pkt_ready;
 	wire                    bias_rd;
 	wire [9:0]              bias_addr;
 	wire [N*32-1:0]         bias;
@@ -114,7 +122,7 @@ module accel_top #(
 		.l_out_base(c_out_base), .l_out_rp_w(c_out_rp_w), .l_out_ch_pitch(c_out_ch_pitch)
 	);
 
-	layer_controller #(.EAW(EAW), .ADDR(ADDR), .N(N)) u_ctrl (
+	layer_controller #(.EAW(EAW), .ADDR(ADDR), .N(N), .CREDITS(PKT_Q)) u_ctrl (
 		.clk(clk), .rst_n(rst_s), .go(cfg_go), .busy(ctrl_busy), .done(ctrl_done), .img_phase(img_phase),
 		.img_ext_base(c_img_ext_base), .img_words(c_img_words), .wgt_ext_base(c_wgt_ext_base),
 		.m(c_m), .n_groups(c_n_groups), .last_cols(c_last_cols),
@@ -126,7 +134,7 @@ module accel_top #(
 		.feed_start(feed_start), .wgt_base(wgt_base), .tile_addr(tile_addr), .y0(y0), .x0(x0),
 		.lane_on(lane_on), .act_busy(act_busy),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_cols(desc_cols), .desc_full(desc_full),
-		.pkt_last(pkt_last),
+		.pkt_pop(pkt_pop), .pkt_last(pkt_last && pkt_pop),
 		.bias_rd(bias_rd), .bias_addr(bias_addr), .wgt_rdata(wgt_rdata), .bias(bias)
 	);
 
@@ -194,7 +202,15 @@ module accel_top #(
 		.c_col(c_col), .c_row(c_row), .c_valid(c_valid), .ch_pitch(c_out_ch_pitch),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_lanes(lane_on), .desc_cols(desc_cols),
 		.desc_full(desc_full),
-		.pkt_valid(pkt_valid), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last)
+		.pkt_valid(col_valid), .pkt_data(col_data), .pkt_addr(col_addr), .pkt_be(col_be), .pkt_last(col_last)
+	);
+
+	pkt_fifo #(.W(N*32 + ADDR + N + 1), .DEPTH(PKT_Q)) u_pktq (
+		.clk(clk), .rst_n(rst_s),
+		.push(col_valid), .din({col_last, col_be, col_addr, col_data}),
+		.out_valid(pkt_valid), .out_ready(pkt_ready),
+		.dout({pkt_last, pkt_be, pkt_addr, pkt_data}),
+		.full(unused_fifo_full)
 	);
 
 `ifndef SYNTHESIS

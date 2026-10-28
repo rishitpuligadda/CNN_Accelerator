@@ -23,6 +23,9 @@ module tb_accel_top;
 	wire [EAW-1:0]          rd_req_addr;
 	wire [31:0]             rd_resp_data;
 	wire                    pkt_valid, pkt_last;
+	reg                     pkt_ready;
+	integer                 rdy_out_pct, stall_left, open_left;
+	wire                    pkt_take = pkt_valid && pkt_ready;
 	wire [N*32-1:0]         pkt_data;
 	wire [ADDR-1:0]         pkt_addr;
 	wire [N-1:0]            pkt_be;
@@ -59,7 +62,7 @@ module tb_accel_top;
 		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .out_base(out_base),
 		.rd_req_valid(rd_req_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(rd_req_addr),
 		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(rd_resp_ready),
-		.pkt_valid(pkt_valid), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last)
+		.pkt_valid(pkt_valid), .pkt_ready(pkt_ready), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last)
 	);
 
 	initial begin
@@ -100,7 +103,27 @@ module tb_accel_top;
 	endfunction
 
 	always @(negedge clk) begin
-		if (pkt_valid) begin
+		if (stall_left > 0) begin
+			pkt_ready  <= 1'b0;
+			stall_left <= stall_left - 1;
+		end
+		else if (rdy_out_pct < 0) begin
+			if (open_left > 0) begin
+				pkt_ready <= 1'b1;
+				open_left <= open_left - 1;
+			end
+			else begin
+				pkt_ready  <= 1'b0;
+				stall_left <= 150 + {$random} % 150;
+				open_left  <= 1 + {$random} % 20;
+			end
+		end
+		else
+			pkt_ready <= ({$random} % 100) < rdy_out_pct;
+	end
+
+	always @(posedge clk) begin
+		if (mem_on && pkt_take) begin
 			pkts <= pkts + 1;
 			if (q_head == q_tail) begin
 				mon_err <= mon_err + 1;
@@ -369,8 +392,8 @@ module tb_accel_top;
 			t0 = cyc;
 			pulse_start;
 			while (!done) begin
-				@(negedge clk);
-				if (pkt_valid) decode_pkt;
+				@(posedge clk);
+				if (pkt_take) decode_pkt;
 				if (cyc - t0 > 600000) $fatal(1, "layer never finished");
 			end
 			if (err_valid || err != 7'd0) begin
@@ -455,6 +478,7 @@ module tb_accel_top;
 		$dumpvars(0, tb_accel_top);
 
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
+		pkt_ready = 1'b1; rdy_out_pct = 100; stall_left = 0; open_left = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0;
 		sq_head = 0; sq_tail = 0; sq_count = 0; rdy_r = 1'b1; mem_on = 1'b0;
 		source(1, 1, 100);
@@ -536,7 +560,19 @@ module tb_accel_top;
 		source(1, 1, 100);
 
 		$display("");
-		$display("5) Invalid configurations must be rejected without running:");
+		$display("5) Backpressure: the packet consumer accepts only 30%% of the time, then stalls for 150-300 cycles at a time:");
+		rdy_out_pct = 30;
+		run(28, 28, 1, 8, 3, 3, 1, 1, 1);
+		run(8, 8, 1, 4, 1, 1, 0, 1, 1);
+		run(14, 14, 4, 8, 3, 3, 1, 2, 1);
+		for (n = 0; n < 6; n = n + 1) begin
+			rdy_out_pct = (n % 2 == 0) ? -1 : 50;
+			run(4 + {$random} % 12, 4 + {$random} % 12, 1 + {$random} % 4, 1 + {$random} % 9, 3, 3, 1, 1 + {$random} % 2, 0);
+		end
+		rdy_out_pct = 100;
+
+		$display("");
+		$display("6) Invalid configurations must be rejected without running:");
 		reject(8, 8, 1, 4, 0, 3, 0, 1, 1, 0, "zero kernel height              ");
 		reject(8, 8, 1, 4, 3, 3, 0, 5, 1, 1, "stride 5                        ");
 		reject(8, 8, 1, 4, 3, 3, 3, 1, 1, 2, "padding as large as the kernel  ");
@@ -549,7 +585,7 @@ module tb_accel_top;
 
 		repeat (4) @(negedge clk);
 		$display("");
-		$display("6) Totals: %0d layers, %0d packets, %0d cycles against %0d ideal compute cycles, %0d expected packets missing",
+		$display("7) Totals: %0d layers, %0d packets, %0d cycles against %0d ideal compute cycles, %0d expected packets missing",
 		         layers, pkts, total_cycles, total_ideal, q_tail - q_head);
 		if (q_head != q_tail) begin
 			errors = errors + 1;
