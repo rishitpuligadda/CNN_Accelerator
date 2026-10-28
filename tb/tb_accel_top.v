@@ -31,6 +31,7 @@ module tb_accel_top;
 	integer                 img  [0:16*SQ*SQ-1];
 	integer                 wt   [0:64*16*KQ-1];
 	integer                 refo [0:64*SQ*SQ-1];
+	integer                 bias_v [0:255];
 	integer                 got  [0:64*SQ*SQ-1];
 	integer                 hw   [0:64*SQ*SQ-1];
 
@@ -175,7 +176,7 @@ module tb_accel_top;
 				$display("");
 			end
 			for (f = 0; f < L_F; f = f + 1) begin
-				$display("    filter %0d weights:", f);
+				$display("    filter %0d weights (bias %0d):", f, bias_v[f]);
 				for (kh = 0; kh < L_KH; kh = kh + 1) begin
 					$write("      ");
 					for (kw = 0; kw < L_KW; kw = kw + 1) $write("%5d", wt[widx(f, kh * L_KW + kw)]);
@@ -203,7 +204,7 @@ module tb_accel_top;
 				end
 				$display("");
 			end
-			$display("      total = %0d, hardware gave %0d", sum, hw[oidx(f, oh, ow)]);
+			$display("      products = %0d, + bias %0d = %0d, hardware gave %0d", sum, bias_v[f], sum + bias_v[f], hw[oidx(f, oh, ow)]);
 		end
 	endtask
 
@@ -224,7 +225,7 @@ module tb_accel_top;
 			end
 			for (f = 0; f < L_F; f = f + 1) begin
 				$fdisplay(fd, "");
-				$fdisplay(fd, "filter %0d weights, k = c*(kh*kw) + kh*kw_size + kw", f);
+				$fdisplay(fd, "filter %0d bias %0d, weights with k = c*(kh*kw) + kh*kw_size + kw", f, bias_v[f]);
 				for (kk = 0; kk < L_M; kk = kk + 1) begin
 					$fwrite(fd, "%5d", wt[widx(f, kk)]);
 					if (kk % L_KW == L_KW - 1) $fdisplay(fd, "");
@@ -273,6 +274,10 @@ module tb_accel_top;
 					if (small_vals != 0) wt[widx(f, kk)] = ({$random} % 3) - 1;
 					else                 wt[widx(f, kk)] = $random % 128;
 
+			for (f = 0; f < nf; f = f + 1)
+				if (small_vals != 0) bias_v[f] = ({$random} % 21) - 10;
+				else                 bias_v[f] = $random % 1048576;
+
 			for (word = 0; word < (nbytes + 3) / 4; word = word + 1)
 				ext_mem[IMG_EB + word] = $random;
 			for (c = 0; c < ch; c = c + 1)
@@ -282,11 +287,15 @@ module tb_accel_top;
 						ext_mem[IMG_EB + b / 4][(b % 4) * 8 +: 8] = 8'(img[c * SQ * SQ + y * SQ + x]);
 					end
 
-			for (g = 0; g < L_G; g = g + 1)
+			for (g = 0; g < L_G; g = g + 1) begin
+				for (j = 0; j < 4; j = j + 1)
+					if (4 * g + j < nf) ext_mem[WGT_EB + g * (L_M + 4) + j] = bias_v[4 * g + j];
+					else                ext_mem[WGT_EB + g * (L_M + 4) + j] = 32'h0;
 				for (kk = 0; kk < L_M; kk = kk + 1)
 					for (j = 0; j < 4; j = j + 1)
-						if (4 * g + j < nf) ext_mem[WGT_EB + g * L_M + kk][j * 8 +: 8] = 8'(wt[widx(4 * g + j, kk)]);
-						else                ext_mem[WGT_EB + g * L_M + kk][j * 8 +: 8] = 8'h00;
+						if (4 * g + j < nf) ext_mem[WGT_EB + g * (L_M + 4) + 4 + kk][j * 8 +: 8] = 8'(wt[widx(4 * g + j, kk)]);
+						else                ext_mem[WGT_EB + g * (L_M + 4) + 4 + kk][j * 8 +: 8] = 8'h00;
+			end
 
 			for (f = 0; f < nf; f = f + 1)
 				for (oh = 0; oh < L_OH; oh = oh + 1)
@@ -300,7 +309,7 @@ module tb_accel_top;
 									if (y >= 0 && y < h && x >= 0 && x < w)
 										sum = sum + img[c * SQ * SQ + y * SQ + x] * wt[widx(f, c * kh_ * kw_ + kh * kw_ + kw)];
 								end
-						refo[oidx(f, oh, ow)] = sum;
+						refo[oidx(f, oh, ow)] = sum + bias_v[f];
 						got[oidx(f, oh, ow)]  = 0;
 						hw[oidx(f, oh, ow)]   = 0;
 					end
@@ -311,7 +320,7 @@ module tb_accel_top;
 						top = (g == L_G - 1) ? ((nf - 1) % 4) : 3;
 						for (j = 0; j <= top; j = j + 1) begin
 							for (i = 0; i < 4; i = i + 1)
-								pk[i*32 +: 32] = (ow + i < L_OW) ? refo[oidx(4 * g + j, oh, ow + i)] : 0;
+								pk[i*32 +: 32] = (ow + i < L_OW) ? refo[oidx(4 * g + j, oh, ow + i)] : bias_v[4 * g + j];
 							e_data[q_tail] = pk;
 							e_addr[q_tail] = ADDR'(1 + (4 * g + j) * L_OCH + oh * L_ORP + ow / 4);
 							e_be[q_tail]   = {(ow + 3 < L_OW), (ow + 2 < L_OW), (ow + 1 < L_OW), 1'b1};
@@ -497,6 +506,8 @@ module tb_accel_top;
 		run(9, 9, 1, 4, 1, 1, 0, 2, 1);
 		run(9, 11, 2, 4, 1, 1, 0, 2, 1);
 		run(13, 13, 1, 4, 1, 1, 0, 3, 1);
+		run(4, 4, 1, 16, 1, 1, 0, 1, 1);
+		run(4, 5, 2, 16, 1, 1, 0, 1, 1);
 
 		$display("");
 		$display("3) 25 random layer shapes:");

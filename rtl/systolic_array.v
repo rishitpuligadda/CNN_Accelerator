@@ -10,7 +10,8 @@ module systolic_array #(
 	input                                             clk, rst_n,
 	input                                             en,
 	input                                             first,
-	input                                             last
+	input                                             last,
+	input  signed     [TILE_MAX*4*WIDTH-1:0]          bias
 );
 	localparam ACC_W = 4*WIDTH;
 	localparam ROW_W = $clog2(TILE_MAX);
@@ -61,6 +62,7 @@ module systolic_array #(
 				Processing_Element #(.WIDTH(WIDTH)) PE (
 					.clk(clk), .rst_n(rst_n),
 					.en(en_d[i+j]), .first(first_d[i+j]), .last(last_d[i+j]),
+					.bias(bias[j*ACC_W +: ACC_W]),
 					.N(n_in), .W(w_in), .E(east[i][j]), .S(south[i][j]),
 					.result(result[i][j]),
 					.done(pe_done[i*TILE_MAX + j])

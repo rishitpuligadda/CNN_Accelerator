@@ -11,6 +11,7 @@ module tb_result_collector;
 
 	reg                  clk, rst_n;
 	reg                  en, first_k, last_k;
+	reg  [N*ACC_W-1:0]   bias_r;
 	reg  [N*WIDTH-1:0]   act_lanes, wgt_lanes;
 	wire [N*WIDTH-1:0]   act_sk, wgt_sk;
 	wire [N*ACC_W-1:0]   c_col;
@@ -46,7 +47,7 @@ module tb_result_collector;
 
 	systolic_array #(.TILE_MAX(N), .WIDTH(WIDTH)) u_array (
 		.c_col(c_col), .c_row(c_row), .c_valid(c_valid),
-		.a(wgt_sk), .b(act_sk), .clk(clk), .rst_n(rst_n), .en(en), .first(first_k), .last(last_k)
+		.a(wgt_sk), .b(act_sk), .clk(clk), .rst_n(rst_n), .en(en), .first(first_k), .last(last_k), .bias(bias_r)
 	);
 
 	result_collector #(.N(N), .ACC_W(ACC_W), .ADDR(ADDR), .QD(4)) dut (
@@ -137,7 +138,7 @@ module tb_result_collector;
 			for (j = 0; j < N; j = j + 1) begin
 				if (((cols >> j) & 1) != 0) begin
 					for (i = 0; i < N; i = i + 1) begin
-						sum = 0;
+						sum = $signed(bias_r[j*ACC_W +: ACC_W]);
 						for (k = 0; k < m; k = k + 1)
 							sum = sum + A[i][k] * B[k][j];
 						w[i*ACC_W +: ACC_W] = sum;
@@ -235,6 +236,7 @@ module tb_result_collector;
 		errors = 0; tiles = 0; cyc = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0; lasts = 0; full_seen = 0; col_results = 0;
 		first_k = 1'b0; last_k = 1'b0;
+		for (n = 0; n < N; n = n + 1) bias_r[n*ACC_W +: ACC_W] = $random % 100000;
 		mon_on = 1'b0; trace = 1'b0;
 		en = 1'b0; act_lanes = 0; wgt_lanes = 0;
 		ch_pitch = 11'd49; desc_push = 1'b0; desc_addr = 0; desc_lanes = 0; desc_cols = 0;

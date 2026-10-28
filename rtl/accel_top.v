@@ -84,6 +84,9 @@ module accel_top #(
 	wire [N-1:0]            c_valid;
 
 	wire                    desc_push, desc_full;
+	wire                    bias_rd;
+	wire [9:0]              bias_addr;
+	wire [N*32-1:0]         bias;
 	wire [ADDR-1:0]         desc_addr;
 	wire [3:0]              desc_cols;
 
@@ -123,7 +126,8 @@ module accel_top #(
 		.feed_start(feed_start), .wgt_base(wgt_base), .tile_addr(tile_addr), .y0(y0), .x0(x0),
 		.lane_on(lane_on), .act_busy(act_busy),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_cols(desc_cols), .desc_full(desc_full),
-		.pkt_last(pkt_last)
+		.pkt_last(pkt_last),
+		.bias_rd(bias_rd), .bias_addr(bias_addr), .wgt_rdata(wgt_rdata), .bias(bias)
 	);
 
 	dma #(.EAW(EAW), .SAW(ADDR)) u_dma (
@@ -152,7 +156,7 @@ module accel_top #(
 		.clk(clk),
 		.en0(!img_phase && dma_wr_en), .we0(!img_phase && dma_wr_en), .be0(4'hF),
 		.addr0(dma_wr_addr[9:0]), .wdata0(dma_wr_data), .rdata0(unused_wgt_rdata0),
-		.en1(wgt_mem_en), .addr1(wgt_mem_addr), .rdata1(wgt_rdata)
+		.en1(wgt_mem_en || bias_rd), .addr1(bias_rd ? bias_addr : wgt_mem_addr), .rdata1(wgt_rdata)
 	);
 
 	act_feeder #(.ADDR(ADDR), .DIMW(8), .KW_W(3), .CW(8), .OUT_REG(OUT_REG)) u_act (
@@ -182,7 +186,7 @@ module accel_top #(
 	systolic_array #(.TILE_MAX(N), .WIDTH(8)) u_array (
 		.c_col(c_col), .c_row(c_row), .c_valid(c_valid),
 		.a(wgt_sk), .b(act_sk), .clk(clk), .rst_n(rst_s),
-		.en(act_valid && wgt_valid), .first(act_first), .last(act_last)
+		.en(act_valid && wgt_valid), .first(act_first), .last(act_last), .bias(bias)
 	);
 
 	result_collector #(.N(N), .ACC_W(32), .ADDR(ADDR), .QD(4)) u_coll (
@@ -207,6 +211,8 @@ module accel_top #(
 				$display("ASSERT %m t=%0t: activation and weight valid differ", $time);
 			if (!img_phase && dma_wr_en && wgt_mem_en && dma_wr_addr[9] == wgt_mem_addr[9])
 				$display("ASSERT %m t=%0t: DMA writes the weight half the feeder is reading", $time);
+			if (bias_rd && wgt_mem_en)
+				$display("ASSERT %m t=%0t: bias load and weight feeder use the weight RAM read port together", $time);
 			if (img_phase && act_mem_en)
 				$display("ASSERT %m t=%0t: feeder reads the feature buffer while the image is loading", $time);
 		end

@@ -211,8 +211,8 @@ module layer_config #(
 
 				S_CHK: begin
 					busy <= 1'b0;
-					if (geo_bad || m_full > DEPTH_W || cbytes > (4 * DEPTH_F - 4) || out_end > OUT_SPACE) begin
-						err <= {out_end > OUT_SPACE, cbytes > (4 * DEPTH_F - 4), m_full > DEPTH_W, geo_bad, 3'b000};
+					if (geo_bad || m_full + 14'd4 > DEPTH_W || cbytes > (4 * DEPTH_F - 4) || out_end > OUT_SPACE) begin
+						err <= {out_end > OUT_SPACE, cbytes > (4 * DEPTH_F - 4), m_full + 14'd4 > DEPTH_W, geo_bad, 3'b000};
 						bad <= 1'b1;
 					end
 					else begin

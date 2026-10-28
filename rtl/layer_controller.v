@@ -44,7 +44,12 @@ module layer_controller #(
     output     [ADDR-1:0]          desc_addr,
     output     [3:0]               desc_cols,
     input                          desc_full,
-    input                          pkt_last
+    input                          pkt_last,
+
+    output                         bias_rd,
+    output     [9:0]               bias_addr,
+    input      [31:0]              wgt_rdata,
+    output reg [N*32-1:0]          bias
 );
 	localparam S_IDLE   = 4'd0;
 	localparam S_IMG    = 4'd1;
@@ -56,6 +61,10 @@ module layer_controller #(
 	localparam S_WAIT   = 4'd7;
 	localparam S_GEND   = 4'd8;
 	localparam S_DRAIN  = 4'd9;
+	localparam S_BWAIT  = 4'd10;
+	localparam S_BIAS   = 4'd11;
+
+	localparam integer FLIGHT = 2 * N + 8;
 
 
 	reg  [3:0]             state;
@@ -69,6 +78,8 @@ module layer_controller #(
 	reg  signed [9:0]      y0_r;
 	reg  [ADDR-1:0]        o_grp_base, o_row_base;
 	reg  [15:0]            tiles_issued, tiles_done;
+	reg  [4:0]             fl_cnt;
+	reg  [2:0]             bcnt;
 
 	localparam integer     NM1        = N - 1;
 	wire        [2:0]      need       = ({21'd0, m} >= NM1) ? 3'd0 : NM1[2:0] - m[2:0];
@@ -78,6 +89,8 @@ module layer_controller #(
 	wire                   last_group = (g == n_groups - 1'b1);
 	wire                   pref_go    = dbuf && ({1'b0, g} + 8'd1 < {1'b0, n_groups});
 	wire signed [9:0]      pad_s      = $signed({7'd0, pad});
+	wire        [10:0]     gw         = m + 11'd4;
+	wire        [1:0]      bidx       = bcnt[1:0] - 2'd1;
 	wire        [ADDR+1:0] x_step     = {{(ADDR-3){1'b0}}, stride, 2'b00};
 
 	assign dma_start     = (state == S_IMG) || (state == S_WLOAD) || (state == S_PREF && pref_go);
@@ -85,10 +98,12 @@ module layer_controller #(
 	assign dma_sram_base = (state == S_IMG)   ? {ADDR{1'b0}} :
 	                       (state == S_WLOAD) ? {{(ADDR-10){1'b0}}, half, 9'd0} :
 	                                            {{(ADDR-10){1'b0}}, ~half, 9'd0};
-	assign dma_nwords    = (state == S_IMG) ? img_words : {{(ADDR-10){1'b0}}, m};
+	assign dma_nwords    = (state == S_IMG) ? img_words : {{(ADDR-10){1'b0}}, gw};
 
 	assign feed_start = issue;
-	assign wgt_base   = {half, 9'd0};
+	assign wgt_base   = {half, 9'd4};
+	assign bias_rd    = (state == S_BIAS) && (bcnt < 3'd4);
+	assign bias_addr  = {half, 7'd0, bcnt[1:0]};
 	assign tile_addr  = row_addr + $signed({1'b0, tx});
 	assign y0         = y0_r;
 	assign x0         = $signed({1'b0, tx[8:0]}) - pad_s;
@@ -126,6 +141,9 @@ module layer_controller #(
 			o_row_base   <= {ADDR{1'b0}};
 			tiles_issued <= 16'd0;
 			tiles_done   <= 16'd0;
+			fl_cnt       <= 5'd0;
+			bcnt         <= 3'd0;
+			bias         <= {(N*32){1'b0}};
 		end
 		else begin
 			done <= 1'b0;
@@ -133,6 +151,8 @@ module layer_controller #(
 			if (dma_done) wpend <= 1'b0;
 			if (act_busy)               since_end <= 3'd0;
 			else if (since_end != 3'd7) since_end <= since_end + 1'b1;
+			if (issue)                  fl_cnt <= FLIGHT[4:0];
+			else if (fl_cnt != 5'd0)    fl_cnt <= fl_cnt - 1'b1;
 
 			case (state)
 				S_IDLE: begin
@@ -141,7 +161,7 @@ module layer_controller #(
 						img_phase    <= 1'b1;
 						g            <= 7'd0;
 						half         <= 1'b0;
-						dbuf         <= (m <= 11'd512);
+						dbuf         <= (m + 11'd4 <= 11'd512);
 						wpend        <= 1'b0;
 						wptr         <= wgt_ext_base;
 						o_grp_base   <= out_base;
@@ -161,7 +181,7 @@ module layer_controller #(
 				end
 
 				S_WLOAD: begin
-					wptr  <= wptr + {{(EAW-11){1'b0}}, m};
+					wptr  <= wptr + {{(EAW-11){1'b0}}, gw};
 					state <= S_WLOADW;
 				end
 
@@ -175,10 +195,26 @@ module layer_controller #(
 					y0_r       <= -pad_s;
 					o_row_base <= o_grp_base;
 					if (pref_go) begin
-						wptr  <= wptr + {{(EAW-11){1'b0}}, m};
+						wptr  <= wptr + {{(EAW-11){1'b0}}, gw};
 						wpend <= 1'b1;
 					end
-					state <= S_ISSUE;
+					state <= S_BWAIT;
+				end
+
+				S_BWAIT: begin
+					if (fl_cnt == 5'd0) begin
+						bcnt  <= 3'd0;
+						state <= S_BIAS;
+					end
+				end
+
+				S_BIAS: begin
+					if (bcnt != 3'd0)
+						bias[bidx*32 +: 32] <= wgt_rdata;
+					if (bcnt == 3'd4)
+						state <= S_ISSUE;
+					else
+						bcnt <= bcnt + 1'b1;
 				end
 
 				S_ISSUE: begin
