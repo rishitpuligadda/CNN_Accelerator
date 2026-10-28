@@ -65,7 +65,7 @@ module tb_processing_element;
 	endtask
 
 	initial begin
-		$dumpfile("pe_dump.vcd");
+		$dumpfile("waveforms/pe_dump.vcd");
 		$dumpvars(0, tb_processing_element);
 
 		// Every input known from time 0

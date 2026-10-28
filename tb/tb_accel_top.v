@@ -211,7 +211,7 @@ module tb_accel_top;
 	task dump_layer;
 		integer c, y, x, f, kk;
 		begin
-			$sformat(fname, "layer%0d_outputs.txt", layers + 1);
+			$sformat(fname, "outputs/layer%0d_outputs.txt", layers + 1);
 			fd = $fopen(fname, "w");
 			$fdisplay(fd, "layer %0d: %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d, stride %0d -> %0dx%0dx%0d output",
 			          layers + 1, L_H, L_W, L_C, L_F, L_KH, L_KW, L_P, L_S, L_OH, L_OW, L_F);
@@ -451,7 +451,7 @@ module tb_accel_top;
 	integer n, rh, rw, rc, rf, rkh, rkw, rp, rs;
 
 	initial begin
-		$dumpfile("accel_top.vcd");
+		$dumpfile("waveforms/accel_top.vcd");
 		$dumpvars(0, tb_accel_top);
 
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;

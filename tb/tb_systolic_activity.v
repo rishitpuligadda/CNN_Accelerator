@@ -302,7 +302,7 @@ module tb_systolic_activity;
 
 	initial begin
 		$timeformat(-9, 0, " ns", 7);
-		$dumpfile("systolic_activity.vcd");
+		$dumpfile("waveforms/systolic_activity.vcd");
 		$dumpvars(0, tb_systolic_activity);
 		rst_n = 1'b0; en = 1'b0; a = 0; b = 0;
 		repeat (2) @(negedge clk);

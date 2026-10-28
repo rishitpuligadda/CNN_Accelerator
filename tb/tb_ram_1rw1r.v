@@ -127,7 +127,7 @@ module tb_ram_1rw1r;
 	endtask
 
 	initial begin
-		$dumpfile("ram_1rw1r.vcd");
+		$dumpfile("waveforms/ram_1rw1r.vcd");
 		$dumpvars(0, tb_ram_1rw1r);
 
 		en0 = 0; we0 = 0; be0 = 0; addr0 = 0; wdata0 = 0; en1 = 0; addr1 = 0;

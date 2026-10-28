@@ -42,7 +42,7 @@ module tb_skew_buffer;
 	endtask
 
 	initial begin
-		$dumpfile("skew_buffer.vcd");
+		$dumpfile("waveforms/skew_buffer.vcd");
 		$dumpvars(0, tb_skew_buffer);
 
 		errors = 0; checks = 0; phase_err = 0;

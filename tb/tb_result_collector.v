@@ -230,7 +230,7 @@ module tb_result_collector;
 	integer t0, p0, e0, m, ln, cl, g;
 
 	initial begin
-		$dumpfile("result_collector.vcd");
+		$dumpfile("waveforms/result_collector.vcd");
 		$dumpvars(0, tb_result_collector);
 
 		errors = 0; tiles = 0; cyc = 0;

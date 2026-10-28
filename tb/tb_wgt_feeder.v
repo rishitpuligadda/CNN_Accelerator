@@ -114,7 +114,7 @@ module tb_wgt_feeder;
 	endtask
 
 	initial begin
-		$dumpfile("wgt_feeder.vcd");
+		$dumpfile("waveforms/wgt_feeder.vcd");
 		$dumpvars(0, tb_wgt_feeder);
 
 		errors = 0; q_head = 0; q_tail = 0; mon_err = 0; words = 0; cyc = 0; ptr = 0; lat_bad = 0; t0 = 0;
