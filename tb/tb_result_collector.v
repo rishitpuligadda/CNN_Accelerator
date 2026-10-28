@@ -10,14 +10,12 @@ module tb_result_collector;
 	localparam QMAX  = 4096;
 
 	reg                  clk, rst_n;
-	reg                  en;
+	reg                  en, first_k, last_k;
 	reg  [N*WIDTH-1:0]   act_lanes, wgt_lanes;
 	wire [N*WIDTH-1:0]   act_sk, wgt_sk;
 	wire [N*ACC_W-1:0]   c_col;
 	wire [N*RW-1:0]      c_row;
 	wire [N-1:0]         c_valid;
-	wire [N*N-1:0]       pe_done;
-	wire                 arr_done;
 
 	reg  [ADDR-1:0]      ch_pitch, desc_addr;
 	reg                  desc_push;
@@ -34,7 +32,7 @@ module tb_result_collector;
 	reg  [ADDR-1:0]      e_addr [0:QMAX-1];
 	reg  [N-1:0]         e_be   [0:QMAX-1];
 	reg                  e_last [0:QMAX-1];
-	integer              q_head, q_tail, mon_err, pkts, lasts, full_seen, pe_pulses, arr_pulses;
+	integer              q_head, q_tail, mon_err, pkts, lasts, full_seen, col_results;
 	integer              errors, tiles, n, cyc;
 	reg                  mon_on, trace;
 
@@ -47,8 +45,8 @@ module tb_result_collector;
 	);
 
 	systolic_array #(.TILE_MAX(N), .WIDTH(WIDTH)) u_array (
-		.c_col(c_col), .c_row(c_row), .c_valid(c_valid), .pe_done(pe_done), .done(arr_done),
-		.a(wgt_sk), .b(act_sk), .clk(clk), .rst_n(rst_n), .en(en)
+		.c_col(c_col), .c_row(c_row), .c_valid(c_valid),
+		.a(wgt_sk), .b(act_sk), .clk(clk), .rst_n(rst_n), .en(en), .first(first_k), .last(last_k)
 	);
 
 	result_collector #(.N(N), .ACC_W(ACC_W), .ADDR(ADDR), .QD(4)) dut (
@@ -70,8 +68,7 @@ module tb_result_collector;
 	always @(negedge clk) begin
 		if (mon_on) begin
 			if (desc_full) full_seen <= full_seen + 1;
-			pe_pulses <= pe_pulses + $countones(pe_done);
-			if (arr_done) arr_pulses <= arr_pulses + 1;
+			col_results <= col_results + $countones(c_valid);
 			if (pkt_valid) begin
 				pkts <= pkts + 1;
 				if (pkt_last) lasts <= lasts + 1;
@@ -155,14 +152,25 @@ module tb_result_collector;
 		end
 	endtask
 
-	task stream_tile(input integer m, input integer lanes, input integer cols, input integer addr, input integer gap);
+	task stream_tile(input integer m, input integer lanes, input integer cols, input integer addr, input integer pregap);
 		integer i, k;
 		begin
-			if (m < 3 || m > MMAX || gap < 1 || lanes < 1 || lanes > 15 || cols < 1 || cols > 15 || addr < 0 || addr > 2047)
+			if (m < 1 || m > MMAX || pregap < 0 || lanes < 1 || lanes > 15 || cols < 1 || cols > 15 || addr < 0 || addr > 2047)
 				$fatal(1, "stream_tile: bad arguments");
+			for (k = 0; k < pregap; k = k + 1) begin
+				@(negedge clk);
+				en        = 1'b0;
+				first_k   = 1'b0;
+				last_k    = 1'b0;
+				desc_push = 1'b0;
+				act_lanes = {(N*WIDTH){1'b0}};
+				wgt_lanes = {(N*WIDTH){1'b0}};
+			end
 			for (k = 0; k < m; k = k + 1) begin
 				@(negedge clk);
-				en = 1'b1;
+				en      = 1'b1;
+				first_k = (k == 0);
+				last_k  = (k == m - 1);
 				for (i = 0; i < N; i = i + 1) begin
 					act_lanes[i*WIDTH +: WIDTH] = WIDTH'(A[i][k]);
 					wgt_lanes[i*WIDTH +: WIDTH] = WIDTH'(B[k][i]);
@@ -173,13 +181,6 @@ module tb_result_collector;
 					desc_lanes = lanes[N-1:0];
 					desc_cols  = cols[N-1:0];
 				end
-			end
-			for (k = 0; k < gap; k = k + 1) begin
-				@(negedge clk);
-				en        = 1'b0;
-				desc_push = 1'b0;
-				act_lanes = {(N*WIDTH){1'b0}};
-				wgt_lanes = {(N*WIDTH){1'b0}};
 			end
 			tiles = tiles + 1;
 		end
@@ -194,8 +195,27 @@ module tb_result_collector;
 		end
 	endtask
 
+	task end_stream;
+		begin
+			@(negedge clk);
+			en        = 1'b0;
+			first_k   = 1'b0;
+			last_k    = 1'b0;
+			desc_push = 1'b0;
+			act_lanes = {(N*WIDTH){1'b0}};
+			wgt_lanes = {(N*WIDTH){1'b0}};
+		end
+	endtask
+
 	task drain;
 		begin
+			@(negedge clk);
+			en        = 1'b0;
+			first_k   = 1'b0;
+			last_k    = 1'b0;
+			desc_push = 1'b0;
+			act_lanes = {(N*WIDTH){1'b0}};
+			wgt_lanes = {(N*WIDTH){1'b0}};
 			repeat (3 * N + 8) @(negedge clk);
 		end
 	endtask
@@ -213,7 +233,8 @@ module tb_result_collector;
 		$dumpvars(0, tb_result_collector);
 
 		errors = 0; tiles = 0; cyc = 0;
-		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0; lasts = 0; full_seen = 0; pe_pulses = 0; arr_pulses = 0;
+		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0; lasts = 0; full_seen = 0; col_results = 0;
+		first_k = 1'b0; last_k = 1'b0;
 		mon_on = 1'b0; trace = 1'b0;
 		en = 1'b0; act_lanes = 0; wgt_lanes = 0;
 		ch_pitch = 11'd49; desc_push = 1'b0; desc_addr = 0; desc_lanes = 0; desc_cols = 0;
@@ -232,6 +253,7 @@ module tb_result_collector;
 		@(negedge clk);
 		trace = 1'b1;
 		tile(4, 15, 15, 100, 1, 1);
+		end_stream;
 		repeat (9) @(negedge clk);
 		trace = 1'b0;
 		drain;
@@ -239,14 +261,15 @@ module tb_result_collector;
 		$display("   a packet leaves the cycle after a column's r3, carrying all 4 rows of that column");
 
 		$display("");
-		$display("2) Full tiles back to back with the minimum one-cycle gap:");
-		for (g = 0; g < 4; g = g + 1) begin
-			m = (g == 0) ? 3 : (g == 1) ? 9 : (g == 2) ? 27 : 72;
+		$display("2) Tiles back to back with NO gap (first/last flags mark the tiles); for M = 1, 2, 3 idle cycles are");
+		$display("   inserted so the last tokens of consecutive tiles are at least 4 cycles apart (the controller's rule):");
+		for (g = 0; g < 7; g = g + 1) begin
+			m = (g == 0) ? 1 : (g == 1) ? 2 : (g == 2) ? 3 : (g == 3) ? 4 : (g == 4) ? 9 : (g == 5) ? 27 : 72;
 			t0 = tiles; p0 = pkts; e0 = mon_err;
 			for (n = 0; n < 8; n = n + 1)
-				tile(m, 15, 15, 1 + 4 * n, 1, 0);
+				tile(m, 15, 15, 1 + 4 * n, (n == 0) ? 1 : ((m < N) ? N - m : 0), 0);
 			drain;
-			$write("  M = %2d:", m);
+			$write("  M = %2d, idle cycles between tiles %0d:", m, (m < N) ? N - m : 0);
 			report(t0, p0, e0);
 		end
 
@@ -272,13 +295,15 @@ module tb_result_collector;
 		report(t0, p0, e0);
 
 		$display("");
-		$display("5) 40 random tiles: random M (3..40), random gaps (1..3), random lanes and columns:");
+		$display("5) 40 random tiles: random M (1..40), random idle cycles (0..2, more if needed for the 4-cycle rule), random lanes and columns:");
 		t0 = tiles; p0 = pkts; e0 = mon_err;
 		for (n = 0; n < 40; n = n + 1) begin
-			m  = 3 + {$random} % 38;
+			m  = 1 + {$random} % 40;
 			ln = 1 + {$random} % 15;
 			cl = 1 + {$random} % 15;
-			tile(m, ln, cl, {$random} % 2048, 1 + {$random} % 3, 0);
+			g  = {$random} % 3;
+			if (m + g < N) g = N - m;
+			tile(m, ln, cl, {$random} % 2048, g, 0);
 		end
 		drain;
 		report(t0, p0, e0);
@@ -295,10 +320,10 @@ module tb_result_collector;
 			errors = errors + 1;
 			$display("FAIL: %0d last flags for %0d tiles", lasts, tiles);
 		end
-		$display("   PE done pulses: %0d (16 per tile), array done pulses: %0d (1 per tile)", pe_pulses, arr_pulses);
-		if (pe_pulses != 16 * tiles || arr_pulses != tiles) begin
+		$display("   results leaving the array: %0d (16 per tile)", col_results);
+		if (col_results != 16 * tiles) begin
 			errors = errors + 1;
-			$display("FAIL: PE or array done pulse count is wrong");
+			$display("FAIL: wrong number of results left the array");
 		end
 		if (full_seen != 0) begin
 			errors = errors + 1;

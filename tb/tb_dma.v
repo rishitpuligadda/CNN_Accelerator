@@ -139,17 +139,17 @@ module tb_dma;
 				$display("FAIL: %0d words requested, %0d responses accepted, expected %0d of each",
 				         reqs - r0, resps - s0, nw);
 			end
-			if (exact && lat != ((nw == 0) ? 1 : nw + 2)) begin
+			if (exact && lat != ((nw == 0) ? 2 : nw + 3)) begin
 				errors = errors + 1;
-				$display("FAIL latency for %0d words: %0d cycles, expected %0d", nw, lat, (nw == 0) ? 1 : nw + 2);
+				$display("FAIL latency for %0d words: %0d cycles, expected %0d", nw, lat, (nw == 0) ? 2 : nw + 3);
 			end
 
 			if (!quiet) begin
 				if (nw == 0)
-					$display("  T%0d: ext[%h] -> sram[%0d], 0 words, done after %0d cycle", accepted + 1, eb[EAW-1:0], sb, lat);
+					$display("  T%0d: ext[%h] -> sram[%0d], 0 words, done after %0d cycles", accepted + 1, eb[EAW-1:0], sb, lat);
 				else if (exact)
 					$display("  T%0d: ext[%h..%h] -> sram[%0d..%0d], %0d words, %0d cycles (expected %0d)   ok",
-					         accepted + 1, eb[EAW-1:0], EAW'(eb + nw - 1), sb, sb + nw - 1, nw, lat, nw + 2);
+					         accepted + 1, eb[EAW-1:0], EAW'(eb + nw - 1), sb, sb + nw - 1, nw, lat, nw + 3);
 				else
 					$display("  T%0d: ext[%h..%h] -> sram[%0d..%0d], %0d words, %0d cycles",
 					         accepted + 1, eb[EAW-1:0], EAW'(eb + nw - 1), sb, sb + nw - 1, nw, lat);
@@ -236,10 +236,10 @@ module tb_dma;
 		trace = 1'b0;
 		quiet = 1'b0;
 		$display("   a request moves only when valid and ready are both 1; a word is written to SRAM");
-		$display("   in the cycle its response arrives, whenever that is; done followed after %0d cycles", lat);
+		$display("   one cycle after its response arrives (the write is registered); done followed after %0d cycles", lat);
 
 		$display("");
-		$display("2) Ideal source, same timing as the old DMA (N words take N+2 cycles):");
+		$display("2) Ideal source (N words take N+3 cycles: request, response, registered SRAM write):");
 		source(1, 1, 100);
 		run(0, 0, DEPTH);
 		run(1000, 100, 37);
