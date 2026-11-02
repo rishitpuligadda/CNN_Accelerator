@@ -42,8 +42,10 @@ module tb_skew_buffer;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/skew_buffer.vcd");
-		$dumpvars(0, tb_skew_buffer);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/skew_buffer.vcd");
+			$dumpvars(0, tb_skew_buffer);
+		end
 
 		errors = 0; checks = 0; phase_err = 0;
 		din    = {(LANES*WIDTH){1'b0}};

@@ -161,8 +161,10 @@ module tb_vu_regs;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/vu_regs.vcd");
-		$dumpvars(0, tb_vu_regs);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/vu_regs.vcd");
+			$dumpvars(0, tb_vu_regs);
+		end
 
 		errors = 0; n_v = 0; n_bypass = 0; n_s = 0; n_set = 0; n_v7 = 0;
 		for (i = 0; i < 7; i = i + 1)  mv[i] = {W{1'b0}};

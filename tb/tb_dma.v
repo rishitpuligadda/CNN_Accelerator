@@ -197,8 +197,10 @@ module tb_dma;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/dma.vcd");
-		$dumpvars(0, tb_dma);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/dma.vcd");
+			$dumpvars(0, tb_dma);
+		end
 
 		errors = 0; checks = 0; writes = 0; dones = 0; accepted = 0; reqs = 0; resps = 0;
 		cyc = 0; trace = 1'b0; quiet = 1'b0; exact = 1'b0;

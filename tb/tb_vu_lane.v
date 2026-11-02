@@ -179,8 +179,10 @@ module tb_vu_lane;
 	reg [3:0] op_r;
 
 	initial begin
-		$dumpfile("waveforms/vu_lane.vcd");
-		$dumpvars(0, tb_vu_lane);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/vu_lane.vcd");
+			$dumpvars(0, tb_vu_lane);
+		end
 
 		errors = 0;
 		h1 = 1'b0; h2 = 1'b0; h2n = 1'b0; o1 = 0; o2 = 0; o2n = 0; e1 = 0; e2 = 0; e2n = 0;

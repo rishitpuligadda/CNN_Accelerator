@@ -236,6 +236,7 @@ module tb_accel_top;
 		begin
 			$sformat(fname, "outputs/layer%0d_outputs.txt", layers + 1);
 			fd = $fopen(fname, "w");
+			if (fd == 0) $fatal(1, "cannot open %0s (does the outputs folder exist?)", fname);
 			$fdisplay(fd, "layer %0d: %0dx%0dx%0d input, %0d filters %0dx%0d, pad %0d, stride %0d -> %0dx%0dx%0d output",
 			          layers + 1, L_H, L_W, L_C, L_F, L_KH, L_KW, L_P, L_S, L_OH, L_OW, L_F);
 			for (c = 0; c < L_C; c = c + 1) begin
@@ -474,8 +475,10 @@ module tb_accel_top;
 	integer n, rh, rw, rc, rf, rkh, rkw, rp, rs;
 
 	initial begin
-		$dumpfile("waveforms/accel_top.vcd");
-		$dumpvars(0, tb_accel_top);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/accel_top.vcd");
+			$dumpvars(0, tb_accel_top);
+		end
 
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
 		pkt_ready = 1'b1; rdy_out_pct = 100; stall_left = 0; open_left = 0;

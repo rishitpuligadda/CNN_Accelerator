@@ -3,10 +3,13 @@
 module tb_vector_unit;
 	localparam LANES = 4;
 	localparam ADDR  = 11;
-	localparam NPKT  = 400;
+	localparam NPKT  = 1024;
 	localparam QMAX  = 4096;
 
 	reg                    clk, rst_n;
+	reg                    lut_we_tb = 1'b0;
+	reg  [7:0]             lut_wa_tb = 8'd0;
+	reg  [15:0]            lut_wd_tb = 16'd0;
 	reg                    pm_we;
 	reg  [5:0]             pm_waddr;
 	reg  [31:0]            pm_wdata;
@@ -26,6 +29,7 @@ module tb_vector_unit;
 	reg  [LANES*32-1:0]    p_data [0:NPKT-1];
 	reg  [ADDR-1:0]        p_addr [0:NPKT-1];
 	reg  [LANES-1:0]       p_be   [0:NPKT-1];
+	reg  [7:0]             p_chan [0:NPKT-1];
 	integer                p_idx, n_pkts, avail_pct;
 	reg                    avail;
 
@@ -40,15 +44,21 @@ module tb_vector_unit;
 	integer                e_head, e_tail, errors, stores, cyc, prog;
 
 	reg  signed [31:0]     sum_r [0:LANES-1];
+	reg  signed [31:0]     best_v, best_show;
+	integer                q_m, q_s, q_mode, sweep_lo;
+	real                   q_scale;
+	integer                best_c, nshow4;
 	integer                t_first, t_last;
 
 	vector_unit #(.LANES(LANES), .ADDR(ADDR), .PM_AW(6)) dut (
 		.clk(clk), .rst_n(rst_n),
 		.pm_we(pm_we), .pm_waddr(pm_waddr), .pm_wdata(pm_wdata),
+		.lut_we(lut_we_tb), .lut_waddr(lut_wa_tb), .lut_wdata(lut_wd_tb),
 		.pro_start(pro_start), .pro_len(pro_len), .body_start(body_start), .body_len(body_len),
 		.epi_start(epi_start), .epi_len(epi_len),
 		.layer_start(layer_start), .layer_end(layer_end), .busy(busy), .done(done),
 		.pkt_valid(pkt_valid), .pkt_ready(pkt_ready), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be),
+		.pkt_row(8'd0), .pkt_col(8'd0), .pkt_chan(p_chan[(p_idx < NPKT) ? p_idx : 0]), .pkt_last(1'b0),
 		.st_en(st_en), .st_addr(st_addr), .st_be(st_be), .st_data(st_data)
 	);
 
@@ -108,6 +118,14 @@ module tb_vector_unit;
 	function [31:0] REQ(input [3:0] d, input [3:0] a, input integer q);   REQ   = enc(6'h21, d, a, 4'd0, f11(q)); endfunction
 	function [31:0] CLAMP(input [3:0] d, input [3:0] a, input integer c); CLAMP = enc(6'h22, d, a, 4'd0, f11(c)); endfunction
 	function [31:0] ST8(input [3:0] a, input integer c);     ST8   = enc(6'h38, 4'd0, a, 4'd0, f11(c));     endfunction
+	function [31:0] TAGF(input [3:0] d, input integer f);    TAGF  = enc(6'h08, d, 4'd0, 4'd0, f11(f));     endfunction
+	function [31:0] CMPGT(input [3:0] a, input [3:0] b);     CMPGT = enc(6'h28, 4'd0, a, b, 11'd0);         endfunction
+	function [31:0] P(input [2:0] p, input [31:0] w);
+		begin
+			if (w[25:23] != 3'd0) $fatal(1, "assembler: instruction already has a predicate");
+			P = {w[31:26], p, w[22:0]};
+		end
+	endfunction
 
 	// ---------------------------------------------------------------- reference arithmetic (the spec, in 64 bits)
 	function signed [31:0] sat32(input signed [63:0] x);
@@ -207,6 +225,22 @@ module tb_vector_unit;
 					end
 				endcase
 			end
+			if (prog == 5) begin
+				for (i = 0; i < LANES; i = i + 1) begin
+					x = p_data[n][i*32 +: 32];
+					m1[i*32 +: 32] = req(x, 16'(q_m), 16'(q_m), q_s);
+					w1[i*8 +: 8]   = st8b(m1[i*32 +: 32], -128, 127);
+				end
+				push_store(p_addr[n], p_be[n], w1, p_data[n], m1, (q_mode == 1) ? 8 : 7, n);
+			end
+			else if (prog == 4) begin
+				x = p_data[n][31:0];
+				if (n == 0 || x > best_v) begin
+					best_v = x;
+					best_c = n;
+				end
+			end
+			else
 			push_store(p_addr[n], p_be[n], w1, p_data[n], m1, (prog == 3) ? 3 : 1, n);
 			if (prog == 3) push_store(p_addr[n], p_be[n], w2, p_data[n], m2, 4, n);
 		end
@@ -261,13 +295,21 @@ module tb_vector_unit;
 
 	task show_store;
 		integer i;
-		reg signed [31:0] x, m;
+		reg signed [31:0] x, m, ai;
 		reg signed [7:0]  hb, eb;
+		reg [LANES*8-1:0] ed;
 		begin
+			ed = e_data[e_head];
 			$fwrite(fdo, "prog %0d store %0d (packet %0d) addr %0d be %b: hw", prog, stores, e_pkt[e_head], st_addr, st_be);
-			for (i = 0; i < LANES; i = i + 1) $fwrite(fdo, " %4d", $signed(st_data[i*8 +: 8]));
+			for (i = 0; i < LANES; i = i + 1) begin
+				hb = st_data[i*8 +: 8];
+				$fwrite(fdo, " %4d", hb);
+			end
 			$fwrite(fdo, "   expected");
-			for (i = 0; i < LANES; i = i + 1) $fwrite(fdo, " %4d", $signed(e_data[e_head][i*8 +: 8]));
+			for (i = 0; i < LANES; i = i + 1) begin
+				eb = ed[i*8 +: 8];
+				$fwrite(fdo, " %4d", eb);
+			end
 			$fdisplay(fdo, "%0s", (st_data === e_data[e_head]) ? "" : "   MISMATCH");
 			if (show_left > 0) begin
 				show_left = show_left - 1;
@@ -277,18 +319,50 @@ module tb_vector_unit;
 					            e_pkt[e_head], st_addr, st_be);
 					4: $display("    packet %0d, second store (running sum of all packets so far, saturated to int8):",
 					            e_pkt[e_head]);
+					6: begin
+						hb = st_data[7:0];
+						eb = ed[7:0];
+						$display("    epilogue store: hw class %0d, expected %0d", hb, eb);
+					end
+					7: $display("    packet %0d:", e_pkt[e_head]);
+					8: begin
+						$write("      acc");
+						for (i = 0; i < LANES; i = i + 1) begin
+							ai = e_in[e_head][i*32 +: 32];
+							$write(" %5d", ai);
+						end
+						$write("   exact");
+						for (i = 0; i < LANES; i = i + 1) begin
+							ai = e_in[e_head][i*32 +: 32];
+							$write(" %7.3f", $itor(ai) * $itor(q_m) / (2.0 ** q_s));
+						end
+						$write("   ->  hw");
+						for (i = 0; i < LANES; i = i + 1) begin
+							hb = st_data[i*8 +: 8];
+							$write(" %4d", hb);
+						end
+						$write("   expected");
+						for (i = 0; i < LANES; i = i + 1) begin
+							eb = ed[i*8 +: 8];
+							$write(" %4d", eb);
+						end
+						$display("");
+					end
 					default: $display("    epilogue store (final running sum, clamped to -100..100):");
 				endcase
+				if (e_kind[e_head] != 6 && e_kind[e_head] != 8)
 				for (i = 0; i < LANES; i = i + 1) begin
 					x  = e_in[e_head][i*32 +: 32];
 					m  = e_mid[e_head][i*32 +: 32];
 					hb = st_data[i*8 +: 8];
-					eb = e_data[e_head][i*8 +: 8];
+					eb = ed[i*8 +: 8];
 					case (e_kind[e_head])
 						1: $display("      lane %0d: acc %9d  x M / 2^S = %10.3f  -> REQ %6d  -> clamp/int8: hw %4d, expected %4d",
 						            i, x, $itor(x) * $itor((x < 0 && prog == 2) ? M1 / 8 : ((x < 0) ? 0 : M1)) / (2.0 ** S1) + 0.0,
 						            m, hb, eb);
 						3: $display("      lane %0d: input %9d  -> chain result %8d  -> hw %4d, expected %4d", i, x, m, hb, eb);
+						7: $display("      lane %0d: acc %11d  x %0.6f = %12.3f  -> REQ %11d  -> int8: hw %4d, expected %4d",
+						            i, x, q_scale, $itor(x) * q_scale, m, hb, eb);
 						default: $display("      lane %0d: running sum %10d  -> hw %4d, expected %4d", i, m, hb, eb);
 					endcase
 				end
@@ -327,14 +401,71 @@ module tb_vector_unit;
 				for (j = 0; j < LANES; j = j + 1) p_data[i][j*32 +: 32] = $random % range;
 				p_addr[i] = ADDR'($random);
 				p_be[i]   = (({$random} % 4) == 0) ? LANES'($random) : {LANES{1'b1}};
+				p_chan[i] = i[7:0];
+				if (prog == 4) begin
+					p_data[i] = {96'd0, 32'($random % range)};
+					p_be[i]   = 4'b0001;
+				end
+				if (prog == 5 && q_mode == 1) begin
+					for (j = 0; j < LANES; j = j + 1) p_data[i][j*32 +: 32] = sweep_lo + 4 * i + j;
+					p_be[i] = {LANES{1'b1}};
+				end
+				if (prog == 5 && q_mode == 2) begin
+					for (j = 0; j < LANES; j = j + 1)
+						case ({$random} % 6)
+							0:       p_data[i][j*32 +: 32] = 32'sh80000000;
+							1:       p_data[i][j*32 +: 32] = 32'sh7FFFFFFF;
+							2:       p_data[i][j*32 +: 32] = 0;
+							3:       p_data[i][j*32 +: 32] = -1;
+							4:       p_data[i][j*32 +: 32] = 1;
+							default: p_data[i][j*32 +: 32] = $random;
+						endcase
+				end
 			end
 			n_pkts = n;
 		end
 	endtask
 
-	task run_layer(input [8*48:1] name, input integer n, input integer range, input integer pct);
+	task quant_program(input integer m, input integer sh);
+		begin
+			q_m = m;
+			q_s = sh;
+			prg[0] = LI(1, m); prg[1] = SETQ(0, 1, 1, sh);
+			prg[2] = LI(3, -128); prg[3] = LI(4, 127); prg[4] = SETC(0, 3, 4);
+			prg[5] = REQ(0, 7, 0); prg[6] = ST8(0, 0);
+			load_program(5, 2, 0);
+		end
+	endtask
+
+	task run_scale(input real scale, input integer show);
+		integer m, sh, rng;
+		real    approx;
+		begin
+			sh = 0;
+			while ($rtoi(scale * (2.0 ** (sh + 1)) + 0.5) <= 32767 && sh < 47) sh = sh + 1;
+			m = $rtoi(scale * (2.0 ** sh) + 0.5);
+			approx  = $itor(m) / (2.0 ** sh);
+			q_scale = scale;
+			quant_program(m, sh);
+			$display("  scale %0.7f  ->  M = %5d, S = %2d   (M / 2^S = %0.9f, relative error %0.5f%%)",
+			         scale, m, sh, approx, 100.0 * (approx - scale) / scale);
+			rng = $rtoi(200.0 / scale);
+			if (rng < 2) rng = 2;
+			show_left = show;
+			q_mode = 0;
+			run_layer("    200 packets of random accumulators", 200, rng, 100);
+		end
+	endtask
+
+	task run_layer(input [8*56:1] name, input integer n, input integer range, input integer pct);
 		integer t0, e0, i;
 		begin
+			if (e_head != e_tail) begin
+				errors = errors + 1;
+				$display("FAIL: %0d expected stores from the previous run never happened", e_tail - e_head);
+			end
+			e_head = 0;
+			e_tail = 0;
 			make_packets(n, range);
 			for (i = 0; i < LANES; i = i + 1) sum_r[i] = 0;
 			p_idx = 0;
@@ -362,6 +493,26 @@ module tb_vector_unit;
 				e_be[e_tail]   = p_be[n - 1];
 				e_tail = e_tail + 1;
 			end
+			if (prog == 4) begin
+				e_data[e_tail] = {24'd0, 8'(best_c)};
+				e_mid[e_tail]  = {(LANES*32){1'b0}};
+				e_in[e_tail]   = {(LANES*32){1'b0}};
+				e_kind[e_tail] = 6;
+				e_pkt[e_tail]  = n;
+				e_addr[e_tail] = p_addr[n - 1];
+				e_be[e_tail]   = p_be[n - 1];
+				e_tail = e_tail + 1;
+				if (nshow4 > 0) begin
+					nshow4 = nshow4 - 1;
+					$write("    logits (class 0..%0d):", n - 1);
+					for (i = 0; i < n; i = i + 1) begin
+						best_show = p_data[i][31:0];
+						$write(" %0d", best_show);
+					end
+					$display("");
+					$display("    largest logit %0d at class %0d", best_v, best_c);
+				end
+			end
 			layer_end = 1'b1;
 			@(negedge clk);
 			layer_end = 1'b0;
@@ -382,18 +533,21 @@ module tb_vector_unit;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/vector_unit.vcd");
-		$dumpvars(0, tb_vector_unit);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/vector_unit.vcd");
+			$dumpvars(0, tb_vector_unit);
+		end
 
 		fdo = $fopen("outputs/vector_unit_outputs.txt", "w");
 		show_left = 0;
 		errors = 0; stores = 0; cyc = 0; e_head = 0; e_tail = 0; p_idx = 0; n_pkts = 0; avail_pct = 100; avail = 1'b1;
-		prog = 0; t_first = 0; t_last = 0;
+		prog = 0; t_first = 0; t_last = 0; best_v = 0; best_show = 0; best_c = 0; nshow4 = 0;
+		q_m = 0; q_s = 0; q_mode = 0; sweep_lo = 0; q_scale = 0.0;
 		pm_we = 1'b0; pm_waddr = 0; pm_wdata = 0;
 		pro_start = 0; pro_len = 0; body_start = 0; body_len = 0; epi_start = 0; epi_len = 0;
 		layer_start = 1'b0; layer_end = 1'b0;
 		for (np = 0; np < NPKT; np = np + 1) begin
-			p_data[np] = 0; p_addr[np] = 0; p_be[np] = 0;
+			p_data[np] = 0; p_addr[np] = 0; p_be[np] = 0; p_chan[np] = 0;
 		end
 
 		rst_n = 1'b0;
@@ -413,10 +567,10 @@ module tb_vector_unit;
 		prg[6] = REQ(0, 7, 0); prg[7] = ST8(0, 0);
 		load_program(6, 2, 0);
 		show_left = 3;
-		run_layer("ReLU, packets always ready        ", NPKT, 100000, 100);
+		run_layer("ReLU, packets always ready        ", 400, 100000, 100);
 		$display("     %0d cycles for %0d packets = %0.2f cycles per packet (2 instructions + 1 wait for REQ)",
-		         t_last - t_first, NPKT, $itor(t_last - t_first) / NPKT);
-		run_layer("ReLU                              ", NPKT, 100000, 30);
+		         t_last - t_first, 400, $itor(t_last - t_first) / 400);
+		run_layer("ReLU                              ", 400, 100000, 30);
 
 		$display("");
 		$display("2) Leaky ReLU (M_neg = M/8) with a low clamp (hi = 50, like ReLU6 in the output scale):");
@@ -424,8 +578,8 @@ module tb_vector_unit;
 		prg[1] = LI(2, M1 / 8); prg[4] = LI(4, 50);
 		load_program(6, 2, 0);
 		show_left = 3;
-		run_layer("Leaky + clamp                     ", NPKT, 100000, 100);
-		run_layer("Leaky + clamp                     ", NPKT, 100000, 40);
+		run_layer("Leaky + clamp                     ", 400, 100000, 100);
+		run_layer("Leaky + clamp                     ", 400, 100000, 40);
 
 		$display("");
 		$display("3) Every phase-2 instruction, chained dependencies, a running sum kept across packets,");
@@ -470,11 +624,97 @@ module tb_vector_unit;
 		run_layer("all instructions                  ", 120, 3000, 100);
 		run_layer("all instructions                  ", 120, 3000, 50);
 
+		$display("");
+		$display("4) Argmax over classes: each class is one packet (value in lane 0, class number in the chan tag).");
+		$display("     prologue: LUI s1,0x8000  BCAST v0,s1  VLI v1,0  LI s3,0  LI s4,127  SETC c1,s3,s4");
+		$display("     body:     TAG s2,chan  BCAST v2,s2  CMPGT v7,v0  [p1] MOV v0,v7  [p1] MOV v1,v2");
+		$display("     epilogue: ST8 v1,c1      ([p1] = only lanes where the mask is set, i.e. where the new value is bigger)");
+		prog = 4;
+		np = 0;
+		prg[np] = LUI(1, 32768);        np = np + 1;
+		prg[np] = BCAST(0, 1);          np = np + 1;
+		prg[np] = VLI(1, 0);            np = np + 1;
+		prg[np] = LI(3, 0);             np = np + 1;
+		prg[np] = LI(4, 127);           np = np + 1;
+		prg[np] = SETC(1, 3, 4);        np = np + 1;
+		prg[np] = TAGF(2, 4);           np = np + 1;
+		prg[np] = BCAST(2, 2);          np = np + 1;
+		prg[np] = CMPGT(7, 0);          np = np + 1;
+		prg[np] = P(3'd1, MOV(0, 7));   np = np + 1;
+		prg[np] = P(3'd1, MOV(1, 2));   np = np + 1;
+		prg[np] = ST8(1, 1);            np = np + 1;
+		load_program(6, 5, 1);
+		nshow4 = 3;
+		show_left = 3;
+		run_layer("argmax, 10 classes                ", 10, 1000000, 100);
+		run_layer("argmax, 10 classes                ", 10, 1000000, 100);
+		run_layer("argmax, 10 classes                ", 10, 1000000, 60);
+		for (np = 0; np < 30; np = np + 1)
+			run_layer("argmax, random number of classes  ", 2 + {$random} % 60, 50, 70);
+
+		$display("");
+		$display("5) Requantize only (no activation: M_neg = M_pos), int8 clamp -128..127.");
+		$display("   M and S are computed from each scale the way the Python flow will: the largest S that keeps M <= 32767.");
+		$display("     body:     REQ v0,v7,q0   ST8 v0,c0");
+		prog = 5;
+		run_scale(1.0, 1);
+		run_scale(0.5, 0);
+		run_scale(0.1, 0);
+		run_scale(0.0123, 0);
+		run_scale(0.0037037, 1);
+		run_scale(0.000613, 0);
+		run_scale(0.0000473, 1);
+		run_scale(2.5, 1);
+		run_scale(0.9999, 0);
+		for (np = 0; np < 20; np = np + 1)
+			run_scale(0.00001 + $itor({$random} % 100000) / 100000.0, 0);
+
+		$display("");
+		$display("   Rounding sweeps: every accumulator in a range, consecutively (4 per packet):");
+		q_mode = 1;
+		q_scale = 0.5;
+		$display("   scale 0.5 (M = 1, S = 1): halves round up, also for negative numbers (-2.5 -> -2, -1.5 -> -1, -0.5 -> 0)");
+		quant_program(1, 1);
+		sweep_lo = -8;
+		show_left = 4;
+		run_layer("      sweep -8..7                                ", 4, 1, 100);
+		$display("   scale 0.25 (M = 1, S = 2): only exact .5 values round up (-0.75 -> -1, -0.5 -> 0, -0.25 -> 0)");
+		quant_program(1, 2);
+		sweep_lo = -8;
+		show_left = 4;
+		run_layer("      sweep -8..7                                ", 4, 1, 100);
+		$display("   scale 0.75 (M = 3, S = 2), near the int8 limits: saturation at 127 and -128");
+		quant_program(3, 2);
+		sweep_lo = 164;
+		show_left = 2;
+		run_layer("      sweep 164..171                             ", 2, 1, 100);
+		sweep_lo = -176;
+		show_left = 2;
+		run_layer("      sweep -176..-169                           ", 2, 1, 100);
+		quant_program(1, 3);
+		sweep_lo = -2000;
+		run_layer("      scale 1/8, sweep -2000..1999 (not printed)", 1000, 1, 100);
+		quant_program(15521, 22);
+		sweep_lo = -2000;
+		run_layer("      scale 0.0037, sweep -2000..1999 (not printed)", 1000, 1, 100);
+
+		$display("");
+		$display("   Extreme accumulators (int32 min/max, 0, +-1) with large and small scales:");
+		q_mode = 2;
+		quant_program(32767, 0);
+		run_layer("      M = 32767, S = 0  (int32 overflow -> saturates)", 200, 1, 100);
+		quant_program(32767, 47);
+		run_layer("      M = 32767, S = 47 (tiny scale)              ", 200, 1, 100);
+		quant_program(1, 0);
+		run_layer("      M = 1, S = 0      (scale exactly 1)         ", 200, 1, 100);
+		quant_program(-32768, 15);
+		run_layer("      M = -32768, S = 15 (negative scale = -1)    ", 200, 1, 60);
+
 		repeat (5) @(negedge clk);
 		$display("");
 		$fclose(fdo);
 		$display("   every store (hardware and expected bytes) is listed in outputs/vector_unit_outputs.txt");
-		$display("4) Totals: %0d stores checked, %0d expected stores never happened, %0d errors", stores, e_tail - e_head, errors);
+		$display("6) Totals: %0d stores checked, %0d expected stores never happened, %0d errors", stores, e_tail - e_head, errors);
 		$display("");
 		if (e_head != e_tail) errors = errors + 1;
 		if (errors != 0) $fatal(1, "FAIL: %0d error(s)", errors);

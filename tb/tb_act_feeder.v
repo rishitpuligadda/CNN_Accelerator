@@ -244,8 +244,10 @@ module tb_act_feeder;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/act_feeder.vcd");
-		$dumpvars(0, tb_act_feeder);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/act_feeder.vcd");
+			$dumpvars(0, tb_act_feeder);
+		end
 
 		errors = 0; checks = 0; tiles = 0; nis = 0; flag_err = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; rises = 0; words = 0;

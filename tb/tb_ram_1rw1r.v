@@ -127,8 +127,10 @@ module tb_ram_1rw1r;
 	endtask
 
 	initial begin
-		$dumpfile("waveforms/ram_1rw1r.vcd");
-		$dumpvars(0, tb_ram_1rw1r);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/ram_1rw1r.vcd");
+			$dumpvars(0, tb_ram_1rw1r);
+		end
 
 		en0 = 0; we0 = 0; be0 = 0; addr0 = 0; wdata0 = 0; en1 = 0; addr1 = 0;
 		v0 = 0; v1 = 0; live = 0; exp0 = 0; exp1 = 0;

@@ -230,8 +230,10 @@ module tb_result_collector;
 	integer t0, p0, e0, m, ln, cl, g;
 
 	initial begin
-		$dumpfile("waveforms/result_collector.vcd");
-		$dumpvars(0, tb_result_collector);
+		if ($test$plusargs("vcd")) begin
+			$dumpfile("waveforms/result_collector.vcd");
+			$dumpvars(0, tb_result_collector);
+		end
 
 		errors = 0; tiles = 0; cyc = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0; lasts = 0; full_seen = 0; col_results = 0;
