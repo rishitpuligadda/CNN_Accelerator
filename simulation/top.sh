@@ -7,14 +7,15 @@ if [ "$1" = "macro" ]; then
 fi
 
 rm -rf obj_dir
+mkdir -p waveforms outputs
 
 verilator --binary -j 0 -Wall \
 	../rtl/accel_top.v ../rtl/pkt_fifo.v ../rtl/layer_config.v ../rtl/layer_controller.v ../rtl/dma.v ../rtl/ram_1rw1r.v \
 	../rtl/act_feeder.v ../rtl/wgt_feeder.v ../rtl/skew_buffer.v ../rtl/systolic_array.v \
-	../rtl/Processing_Element.v ../rtl/reset_sync.v ../rtl/result_collector.v \
+	../rtl/Processing_Element.v ../rtl/reset_sync.v ../rtl/result_collector.v ../rtl/vector_unit.v ../rtl/vu_regs.v ../rtl/vu_lane.v \
 	../tb/tb_accel_top.v $EXTRA \
 	--top tb_accel_top --x-assign unique --x-initial unique --timing --timescale 1ns/1ps \
 	--CFLAGS "-std=c++20" --trace \
 	|| { echo "Build failed"; exit 1; }
 
-./obj_dir/Vtb_accel_top +verilator+rand+reset+2 || { echo "Simulation failed"; exit 1; }
+./obj_dir/Vtb_accel_top +verilator+rand+reset+2 "${@:2}" || { echo "Simulation failed"; exit 1; }

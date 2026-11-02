@@ -19,6 +19,7 @@ module layer_config #(
     input      [2:0]               k_w,
     input      [2:0]               pad,
     input      [2:0]               stride,
+    input      [1:0]               pool,
     input      [ADDR-1:0]          out_base,
 
     output reg                     busy,
@@ -61,11 +62,18 @@ module layer_config #(
 	reg  [7:0]  r_h, r_w, r_c, r_f;
 	reg  [2:0]  r_kh, r_kw, r_pad, r_s;
 	reg  [8:0]  rp;
-	reg  [15:0] ch, kk, och;
+	reg  [15:0] ch, kk;
+	reg  [ADDR-1:0] och;   // conv-layout channel pitch (only meaningful when the conv output itself is stored)
 	reg  [ADDR+2:0] khrp, padrp;
 	reg  [12:0] sp;
 	reg  [13:0] m_full;
-	reg  [23:0] cbytes, owords;
+	reg  [23:0] cbytes, swords;
+	reg  [15:0] soch;
+	reg  [1:0]  r_pool;
+	// stored output: the vector unit may pool the conv output by 2^pool before writing it to buffer B
+	wire [7:0]  s_h   = l_out_h >> r_pool;
+	wire [7:0]  s_w   = l_out_w >> r_pool;
+	wire [8:0]  s_rp  = ({1'b0, s_w} + 9'd3) >> 2;
 	reg  [9:0]  rem;
 	reg  [7:0]  q;
 	reg         geo_bad;
@@ -88,8 +96,8 @@ module layer_config #(
 	wire [ADDR+2:0] sk_v    = {{(ADDR-6){1'b0}}, rp} - kw_ext + one_ext;
 	wire [ADDR+2:0] sc_v    = ch[ADDR+2:0] - khrp - kw_ext + one_ext;
 	wire [ADDR+2:0] ta_v    = {{(ADDR){1'b0}}, 3'd4} - padrp - {{ADDR{1'b0}}, r_pad};
-	wire [24:0] out_end = {14'd0, l_out_base} + {1'b0, owords};
-	localparam [24:0] OUT_SPACE = 25'd1 << ADDR;
+	wire [24:0] out_end = {14'd0, l_out_base} + {1'b0, swords};
+	localparam [24:0] OUT_SPACE = DEPTH_F;       // outputs go into buffer B, the same size as buffer A
 
 	always @* begin
 		ma = 8'd0;
@@ -106,7 +114,8 @@ module layer_config #(
 			endcase
 			S_MUL2: case (st)
 				4'd0:    begin ma = l_out_h;     mb = {5'd0, l_out_rp_w}; end
-				default: begin ma = r_f;         mb = och;         end
+				4'd1:    begin ma = s_h;         mb = {7'd0, s_rp}; end
+				default: begin ma = r_f;         mb = soch;        end
 			endcase
 			default: begin ma = 8'd0; mb = 16'd0; end
 		endcase
@@ -117,8 +126,8 @@ module layer_config #(
 			state <= S_IDLE; st <= 4'd0; busy <= 1'b0; go <= 1'b0; bad <= 1'b0; err <= 7'd0;
 			r_h <= 8'd0; r_w <= 8'd0; r_c <= 8'd0; r_f <= 8'd0;
 			r_kh <= 3'd0; r_kw <= 3'd0; r_pad <= 3'd0; r_s <= 3'd0;
-			rp <= 9'd0; ch <= 16'd0; kk <= 16'd0; khrp <= {(ADDR+3){1'b0}}; padrp <= {(ADDR+3){1'b0}}; sp <= 13'd0; och <= 16'd0;
-			m_full <= 14'd0; cbytes <= 24'd0; owords <= 24'd0; rem <= 10'd0; q <= 8'd0; geo_bad <= 1'b0;
+			rp <= 9'd0; ch <= 16'd0; kk <= 16'd0; khrp <= {(ADDR+3){1'b0}}; padrp <= {(ADDR+3){1'b0}}; sp <= 13'd0; och <= {ADDR{1'b0}};
+			m_full <= 14'd0; cbytes <= 24'd0; swords <= 24'd0; soch <= 16'd0; r_pool <= 2'd0; rem <= 10'd0; q <= 8'd0; geo_bad <= 1'b0;
 			l_img_ext_base <= {EAW{1'b0}}; l_wgt_ext_base <= {EAW{1'b0}}; l_img_words <= {(ADDR+1){1'b0}};
 			l_m <= 11'd0; l_n_groups <= 7'd0; l_last_cols <= 4'd0; l_in_h <= 8'd0; l_in_w <= 8'd0;
 			l_kh_max <= 3'd0; l_kw_max <= 3'd0; l_c_max <= 8'd0; l_pad <= 3'd0; l_stride <= 3'd0;
@@ -141,7 +150,7 @@ module layer_config #(
 						end
 						else begin
 							r_h <= in_h; r_w <= in_w; r_c <= in_c; r_f <= n_filt;
-							r_kh <= k_h; r_kw <= k_w; r_pad <= pad; r_s <= stride;
+							r_kh <= k_h; r_kw <= k_w; r_pad <= pad; r_s <= stride; r_pool <= pool;
 							rp  <= ({1'b0, in_w} + 9'd3) & 9'h1FC;
 							l_img_ext_base <= img_ext_base;
 							l_wgt_ext_base <= wgt_ext_base;
@@ -201,11 +210,14 @@ module layer_config #(
 				end
 
 				S_MUL2: begin
-					if (st == 4'd0) och <= prod[15:0];
-					else begin
-						owords <= prod;
-						state  <= S_CHK;
-					end
+					case (st)
+						4'd0:    och    <= prod[ADDR-1:0];
+						4'd1:    soch   <= prod[15:0];
+						default: begin
+							swords <= prod;
+							state  <= S_CHK;
+						end
+					endcase
 					st <= st + 1'b1;
 				end
 
@@ -234,7 +246,7 @@ module layer_config #(
 						l_step_c       <= sc_v;
 						l_tile_addr0   <= ta_v;
 						l_row_step     <= sp[ADDR+1:0];
-						l_out_ch_pitch <= och[ADDR-1:0];
+						l_out_ch_pitch <= och;
 					end
 					state <= S_IDLE;
 				end

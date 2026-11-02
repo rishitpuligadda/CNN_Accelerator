@@ -44,6 +44,9 @@ module layer_controller #(
     output                         desc_push,
     output     [ADDR-1:0]          desc_addr,
     output     [3:0]               desc_cols,
+    output     [7:0]               desc_row,
+    output     [7:0]               desc_col,
+    output     [7:0]               desc_chan,
     input                          desc_full,
     input                          pkt_pop,
     input                          pkt_last,
@@ -125,6 +128,9 @@ module layer_controller #(
 	assign desc_push = issue;
 	assign desc_addr = o_row_base + {{(ADDR-6){1'b0}}, ow[7:2]};
 	assign desc_cols = last_group ? last_cols : 4'hF;
+	assign desc_row  = oh;
+	assign desc_col  = ow;
+	assign desc_chan = {g[5:0], 2'b00};          // at most 255 filters, so g <= 63
 
 	always @(posedge clk or negedge rst_n) begin
 		if (!rst_n) begin

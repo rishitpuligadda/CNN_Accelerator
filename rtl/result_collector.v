@@ -14,12 +14,18 @@ module result_collector #(
     input      [ADDR-1:0]          desc_addr,
     input      [N-1:0]             desc_lanes,
     input      [N-1:0]             desc_cols,
+    input      [7:0]               desc_row,
+    input      [7:0]               desc_col,
+    input      [7:0]               desc_chan,
     output                         desc_full,
     output reg                     pkt_valid,
     output reg [N*ACC_W-1:0]       pkt_data,
     output reg [ADDR-1:0]          pkt_addr,
     output reg [N-1:0]             pkt_be,
-    output reg                     pkt_last
+    output reg                     pkt_last,
+    output reg [7:0]               pkt_row,
+    output reg [7:0]               pkt_col,
+    output reg [7:0]               pkt_chan
 );
 	localparam RW = $clog2(N);
 	localparam QW = $clog2(QD);
@@ -28,12 +34,19 @@ module result_collector #(
 	reg  [ADDR-1:0]      q_addr  [0:QD-1];
 	reg  [N-1:0]         q_lanes [0:QD-1];
 	reg  [N-1:0]         q_cols  [0:QD-1];
+	reg  [7:0]           q_row   [0:QD-1];
+	reg  [7:0]           q_col   [0:QD-1];
+	reg  [7:0]           q_chan  [0:QD-1];
 	reg  [QW-1:0]        rd_ptr, wr_ptr;
 	reg  [QW:0]          count;
 
 	wire [ADDR-1:0]      h_addr  = q_addr[rd_ptr];
 	wire [N-1:0]         h_lanes = q_lanes[rd_ptr];
 	wire [N-1:0]         h_cols  = q_cols[rd_ptr];
+	wire [7:0]           h_row   = q_row[rd_ptr];
+	wire [7:0]           h_col   = q_col[rd_ptr];
+	wire [7:0]           h_chan  = q_chan[rd_ptr];
+	reg  [7:0]           sel_chan;
 
 	wire [N-1:0]         fin;
 	wire [N-1:0]         is_last;
@@ -86,8 +99,10 @@ module result_collector #(
 		sel_addr = {ADDR{1'b0}};
 		sel_en   = 1'b0;
 		sel_last = 1'b0;
+		sel_chan = 8'd0;
 		for (jj = 0; jj < N; jj = jj + 1) begin
 			if (fin[jj]) begin
+				sel_chan = sel_chan | (h_chan + jj[7:0]);
 				sel_data = sel_data | word[jj];
 				sel_addr = sel_addr | (h_addr + pmul[jj*ADDR +: ADDR]);
 				sel_en   = sel_en   | h_cols[jj];
@@ -106,12 +121,18 @@ module result_collector #(
 			pkt_addr  <= {ADDR{1'b0}};
 			pkt_be    <= {N{1'b0}};
 			pkt_last  <= 1'b0;
+			pkt_row   <= 8'd0;
+			pkt_col   <= 8'd0;
+			pkt_chan  <= 8'd0;
 		end
 		else begin
 			if (desc_push && !desc_full) begin
 				q_addr[wr_ptr]  <= desc_addr;
 				q_lanes[wr_ptr] <= desc_lanes;
 				q_cols[wr_ptr]  <= desc_cols;
+				q_row[wr_ptr]   <= desc_row;
+				q_col[wr_ptr]   <= desc_col;
+				q_chan[wr_ptr]  <= desc_chan;
 				wr_ptr          <= wr_ptr + 1'b1;
 			end
 			if (pop)
@@ -126,6 +147,9 @@ module result_collector #(
 			pkt_addr  <= sel_en ? sel_addr : {ADDR{1'b0}};
 			pkt_be    <= sel_en ? h_lanes  : {N{1'b0}};
 			pkt_last  <= sel_en && sel_last;
+			pkt_row   <= sel_en ? h_row    : 8'd0;
+			pkt_col   <= sel_en ? h_col    : 8'd0;
+			pkt_chan  <= sel_en ? sel_chan : 8'd0;
 		end
 	end
 

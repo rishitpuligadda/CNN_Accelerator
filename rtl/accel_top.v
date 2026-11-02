@@ -27,6 +27,7 @@ module accel_top #(
     input      [2:0]          k_w,
     input      [2:0]          pad,
     input      [2:0]          stride,
+    input      [1:0]          pool,
     input      [ADDR-1:0]     out_base,
 
     output                    rd_req_valid,
@@ -36,12 +37,13 @@ module accel_top #(
     input      [31:0]         rd_resp_data,
     output                    rd_resp_ready,
 
-    output                    pkt_valid,
-    input                     pkt_ready,
-    output     [N*32-1:0]     pkt_data,
-    output     [ADDR-1:0]     pkt_addr,
-    output     [N-1:0]        pkt_be,
-    output                    pkt_last
+    input                     vcfg_we,
+    input      [9:0]          vcfg_addr,
+    input      [31:0]         vcfg_data,
+
+    input                     ob_rd_en,
+    input      [ADDR-1:0]     ob_rd_addr,
+    output     [31:0]         ob_rd_data
 );
 	wire                    rst_s;
 
@@ -91,7 +93,24 @@ module accel_top #(
 	wire [ADDR-1:0]         col_addr;
 	wire [N-1:0]            col_be;
 	wire                    unused_fifo_full;
+	wire [7:0]              desc_row, desc_col, desc_chan;
+	wire [7:0]              col_row, col_col, col_chan;
+
+	// packets from the FIFO to the vector unit
+	wire                    pkt_valid, pkt_ready, pkt_last;
+	wire [N*32-1:0]         pkt_data;
+	wire [ADDR-1:0]         pkt_addr;
+	wire [N-1:0]            pkt_be;
+	wire [7:0]              pkt_row, pkt_col, pkt_chan;
 	wire                    pkt_pop = pkt_valid && pkt_ready;
+
+	// vector unit
+	wire                    vu_busy, vu_done;
+	wire                    st_en;
+	wire [ADDR-1:0]         st_addr;
+	wire [N-1:0]            st_be;
+	wire [N*8-1:0]          st_data;
+	wire [31:0]             unused_ob_rdata0;
 	wire                    bias_rd;
 	wire [9:0]              bias_addr;
 	wire [N*32-1:0]         bias;
@@ -101,18 +120,18 @@ module accel_top #(
 	wire [31:0]             unused_wgt_rdata0;
 	wire                    unused_dma_busy;
 
-	assign busy = cfg_busy || ctrl_busy;
-	assign done = ctrl_done || err_valid;
+	assign busy = cfg_busy || ctrl_busy || vu_busy;
+	assign done = vu_done || err_valid;
 
 	reset_sync u_rst (
 		.rst_sync(rst_s), .rst_async(rst_n), .clk(clk)
 	);
 
 	layer_config #(.EAW(EAW), .ADDR(ADDR), .DEPTH_F(1536), .DEPTH_W(1024)) u_cfg (
-		.clk(clk), .rst_n(rst_s), .start(start), .ctrl_busy(ctrl_busy),
+		.clk(clk), .rst_n(rst_s), .start(start), .ctrl_busy(ctrl_busy || vu_busy),
 		.img_ext_base(img_ext_base), .wgt_ext_base(wgt_ext_base),
 		.in_h(in_h), .in_w(in_w), .in_c(in_c), .n_filt(n_filt),
-		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .out_base(out_base),
+		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .pool(pool), .out_base(out_base),
 		.busy(cfg_busy), .go(cfg_go), .bad(err_valid), .err(err),
 		.l_img_ext_base(c_img_ext_base), .l_wgt_ext_base(c_wgt_ext_base), .l_img_words(c_img_words),
 		.l_m(c_m), .l_n_groups(c_n_groups), .l_last_cols(c_last_cols),
@@ -134,6 +153,7 @@ module accel_top #(
 		.feed_start(feed_start), .wgt_base(wgt_base), .tile_addr(tile_addr), .y0(y0), .x0(x0),
 		.lane_on(lane_on), .act_busy(act_busy),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_cols(desc_cols), .desc_full(desc_full),
+		.desc_row(desc_row), .desc_col(desc_col), .desc_chan(desc_chan),
 		.pkt_pop(pkt_pop), .pkt_last(pkt_last && pkt_pop),
 		.bias_rd(bias_rd), .bias_addr(bias_addr), .wgt_rdata(wgt_rdata), .bias(bias)
 	);
@@ -201,16 +221,80 @@ module accel_top #(
 		.clk(clk), .rst_n(rst_s),
 		.c_col(c_col), .c_row(c_row), .c_valid(c_valid), .ch_pitch(c_out_ch_pitch),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_lanes(lane_on), .desc_cols(desc_cols),
+		.desc_row(desc_row), .desc_col(desc_col), .desc_chan(desc_chan),
 		.desc_full(desc_full),
-		.pkt_valid(col_valid), .pkt_data(col_data), .pkt_addr(col_addr), .pkt_be(col_be), .pkt_last(col_last)
+		.pkt_valid(col_valid), .pkt_data(col_data), .pkt_addr(col_addr), .pkt_be(col_be), .pkt_last(col_last),
+		.pkt_row(col_row), .pkt_col(col_col), .pkt_chan(col_chan)
 	);
 
-	pkt_fifo #(.W(N*32 + ADDR + N + 1), .DEPTH(PKT_Q)) u_pktq (
+	pkt_fifo #(.W(N*32 + ADDR + N + 1 + 24), .DEPTH(PKT_Q)) u_pktq (
 		.clk(clk), .rst_n(rst_s),
-		.push(col_valid), .din({col_last, col_be, col_addr, col_data}),
+		.push(col_valid), .din({col_chan, col_col, col_row, col_last, col_be, col_addr, col_data}),
 		.out_valid(pkt_valid), .out_ready(pkt_ready),
-		.dout({pkt_last, pkt_be, pkt_addr, pkt_data}),
+		.dout({pkt_chan, pkt_col, pkt_row, pkt_last, pkt_be, pkt_addr, pkt_data}),
 		.full(unused_fifo_full)
+	);
+
+	// ---------------------------------------------------------------- vector unit configuration bus
+	// 0x000-0x03F program memory, 0x040-0x050 section registers, 0x100-0x1FF lookup table
+	reg  [5:0]  vs_pro_s, vs_body_s, vs_epi_s, vs_e1_s, vs_e2_s, vs_e3_s;
+	reg  [6:0]  vs_pro_l, vs_body_l, vs_epi_l, vs_e1_l, vs_e2_l, vs_e3_l;
+	reg  [8:0]  vs_pro_c, vs_epi_c, vs_e1_c, vs_e2_c, vs_e3_c;
+
+	always @(posedge clk or negedge rst_s) begin
+		if (!rst_s) begin
+			vs_pro_s <= 6'd0; vs_body_s <= 6'd0; vs_epi_s <= 6'd0; vs_e1_s <= 6'd0; vs_e2_s <= 6'd0; vs_e3_s <= 6'd0;
+			vs_pro_l <= 7'd0; vs_body_l <= 7'd0; vs_epi_l <= 7'd0; vs_e1_l <= 7'd0; vs_e2_l <= 7'd0; vs_e3_l <= 7'd0;
+			vs_pro_c <= 9'd0; vs_epi_c <= 9'd0; vs_e1_c <= 9'd0; vs_e2_c <= 9'd0; vs_e3_c <= 9'd0;
+		end
+		else if (vcfg_we && vcfg_addr[9:6] == 4'b0001)
+			case (vcfg_addr[4:0])
+				5'd0:  vs_pro_s  <= vcfg_data[5:0];
+				5'd1:  vs_pro_l  <= vcfg_data[6:0];
+				5'd2:  vs_pro_c  <= vcfg_data[8:0];
+				5'd3:  vs_body_s <= vcfg_data[5:0];
+				5'd4:  vs_body_l <= vcfg_data[6:0];
+				5'd5:  vs_epi_s  <= vcfg_data[5:0];
+				5'd6:  vs_epi_l  <= vcfg_data[6:0];
+				5'd7:  vs_epi_c  <= vcfg_data[8:0];
+				5'd8:  vs_e1_s   <= vcfg_data[5:0];
+				5'd9:  vs_e1_l   <= vcfg_data[6:0];
+				5'd10: vs_e1_c   <= vcfg_data[8:0];
+				5'd11: vs_e2_s   <= vcfg_data[5:0];
+				5'd12: vs_e2_l   <= vcfg_data[6:0];
+				5'd13: vs_e2_c   <= vcfg_data[8:0];
+				5'd14: vs_e3_s   <= vcfg_data[5:0];
+				5'd15: vs_e3_l   <= vcfg_data[6:0];
+				5'd16: vs_e3_c   <= vcfg_data[8:0];
+				default: begin end
+			endcase
+	end
+
+	vector_unit #(.LANES(N), .ADDR(ADDR), .PM_AW(6)) u_vu (
+		.clk(clk), .rst_n(rst_s),
+		.pm_we(vcfg_we && vcfg_addr[9:6] == 4'b0000), .pm_waddr(vcfg_addr[5:0]), .pm_wdata(vcfg_data),
+		.lut_we(vcfg_we && vcfg_addr[9:8] == 2'b01), .lut_waddr(vcfg_addr[7:0]), .lut_wdata(vcfg_data[15:0]),
+		.pro_start(vs_pro_s), .pro_len(vs_pro_l), .body_start(vs_body_s), .body_len(vs_body_l),
+		.epi_start(vs_epi_s), .epi_len(vs_epi_l),
+		.pro_cnt(vs_pro_c), .epi_cnt(vs_epi_c),
+		.epi1_start(vs_e1_s), .epi1_len(vs_e1_l), .epi1_cnt(vs_e1_c),
+		.epi2_start(vs_e2_s), .epi2_len(vs_e2_l), .epi2_cnt(vs_e2_c),
+		.epi3_start(vs_e3_s), .epi3_len(vs_e3_l), .epi3_cnt(vs_e3_c),
+		.layer_start(cfg_go), .layer_end(ctrl_done), .busy(vu_busy), .done(vu_done),
+		.pkt_valid(pkt_valid), .pkt_ready(pkt_ready), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be),
+		.pkt_row(pkt_row), .pkt_col(pkt_col), .pkt_chan(pkt_chan), .pkt_last(pkt_last),
+		.st_en(st_en), .st_addr(st_addr), .st_be(st_be), .st_data(st_data)
+	);
+
+	// ---------------------------------------------------------------- feature buffer B: the vector unit's output
+	ram_1rw1r #(.DEPTH(1536)) u_featb (
+`ifdef USE_POWER_PINS
+		.vccd1(vccd1), .vssd1(vssd1),
+`endif
+		.clk(clk),
+		.en0(st_en), .we0(st_en), .be0(st_be),
+		.addr0(st_addr), .wdata0(st_data), .rdata0(unused_ob_rdata0),
+		.en1(ob_rd_en), .addr1(ob_rd_addr), .rdata1(ob_rd_data)
 	);
 
 `ifndef SYNTHESIS

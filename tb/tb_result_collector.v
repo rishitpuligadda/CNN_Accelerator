@@ -21,6 +21,11 @@ module tb_result_collector;
 	reg  [ADDR-1:0]      ch_pitch, desc_addr;
 	reg                  desc_push;
 	reg  [N-1:0]         desc_lanes, desc_cols;
+	reg  [7:0]           desc_row, desc_col, desc_chan;
+	wire [7:0]           pkt_row, pkt_col, pkt_chan;
+	reg  [7:0]           e_row  [0:QMAX-1];
+	reg  [7:0]           e_col  [0:QMAX-1];
+	reg  [7:0]           e_chan [0:QMAX-1];
 	wire                 desc_full;
 	wire                 pkt_valid, pkt_last;
 	wire [N*ACC_W-1:0]   pkt_data;
@@ -55,8 +60,10 @@ module tb_result_collector;
 		.c_col(c_col), .c_row(c_row), .c_valid(c_valid),
 		.ch_pitch(ch_pitch),
 		.desc_push(desc_push), .desc_addr(desc_addr), .desc_lanes(desc_lanes), .desc_cols(desc_cols),
+		.desc_row(desc_row), .desc_col(desc_col), .desc_chan(desc_chan),
 		.desc_full(desc_full),
-		.pkt_valid(pkt_valid), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last)
+		.pkt_valid(pkt_valid), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be), .pkt_last(pkt_last),
+		.pkt_row(pkt_row), .pkt_col(pkt_col), .pkt_chan(pkt_chan)
 	);
 
 	initial begin
@@ -78,7 +85,8 @@ module tb_result_collector;
 					$display("FAIL t=%0t: unexpected packet addr=%0d", $time, pkt_addr);
 				end
 				else if (pkt_data !== e_data[q_head] || pkt_addr !== e_addr[q_head] ||
-				         pkt_be !== e_be[q_head] || pkt_last !== e_last[q_head]) begin
+				         pkt_be !== e_be[q_head] || pkt_last !== e_last[q_head] ||
+				         pkt_row !== e_row[q_head] || pkt_col !== e_col[q_head] || pkt_chan !== e_chan[q_head]) begin
 					mon_err <= mon_err + 1;
 					if (mon_err < 10)
 						$display("FAIL t=%0t: packet addr=%0d be=%b last=%b data=%h, expected addr=%0d be=%b last=%b data=%h",
@@ -126,8 +134,13 @@ module tb_result_collector;
 		end
 	endtask
 
+	function [23:0] tile_tags(input integer addr);       // {chan, col, row} given to a tile, derived from its address
+		tile_tags = {8'(addr >> 2), 8'(addr * 4), 8'(addr ^ 90)};
+	endfunction
+
 	task expect_tile(input integer m, input integer lanes, input integer cols, input integer addr);
 		integer i, j, k, sum, top;
+		reg [23:0] tg;
 		reg [N*ACC_W-1:0] w;
 		begin
 			if (lanes < 1 || lanes > 15 || cols < 1 || cols > 15 || addr < 0 || addr > 2047)
@@ -147,6 +160,10 @@ module tb_result_collector;
 					e_addr[q_tail] = ADDR'(addr + j * ch_pitch);
 					e_be[q_tail]   = lanes[N-1:0];
 					e_last[q_tail] = (j == top);
+					tg = tile_tags(addr);
+					e_row[q_tail]  = tg[7:0];
+					e_col[q_tail]  = tg[15:8];
+					e_chan[q_tail] = tg[23:16] + 8'(j);
 					q_tail = q_tail + 1;
 				end
 			end
@@ -181,6 +198,7 @@ module tb_result_collector;
 					desc_addr  = addr[ADDR-1:0];
 					desc_lanes = lanes[N-1:0];
 					desc_cols  = cols[N-1:0];
+					{desc_chan, desc_col, desc_row} = tile_tags(addr);
 				end
 			end
 			tiles = tiles + 1;
@@ -242,6 +260,7 @@ module tb_result_collector;
 		mon_on = 1'b0; trace = 1'b0;
 		en = 1'b0; act_lanes = 0; wgt_lanes = 0;
 		ch_pitch = 11'd49; desc_push = 1'b0; desc_addr = 0; desc_lanes = 0; desc_cols = 0;
+		desc_row = 0; desc_col = 0; desc_chan = 0;
 
 		rst_n = 1'b0;
 		repeat (2) @(negedge clk);
