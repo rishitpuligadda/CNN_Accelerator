@@ -18,6 +18,10 @@ module tb_vu_iss;
 	reg  [31:0]         pm_wdata;
 	reg  [5:0]          pro_start, body_start, epi_start;
 	reg  [6:0]          pro_len, body_len, epi_len;
+	reg  [8:0]          pro_cnt, epi_cnt, e1c, e2c, e3c;
+	reg  [5:0]          e1s, e2s, e3s;
+	reg  [6:0]          e1l, e2l, e3l;
+	integer             iiter;
 	reg                 layer_start, layer_end;
 	wire                unused_busy, done;
 	wire                pkt_valid, pkt_ready;
@@ -37,6 +41,8 @@ module tb_vu_iss;
 		.lut_we(lut_we_tb), .lut_waddr(lut_wa_tb), .lut_wdata(lut_wd_tb),
 		.pro_start(pro_start), .pro_len(pro_len), .body_start(body_start), .body_len(body_len),
 		.epi_start(epi_start), .epi_len(epi_len),
+		.pro_cnt(pro_cnt), .epi_cnt(epi_cnt), .epi1_start(e1s), .epi1_len(e1l), .epi1_cnt(e1c),
+		.epi2_start(e2s), .epi2_len(e2l), .epi2_cnt(e2c), .epi3_start(e3s), .epi3_len(e3l), .epi3_cnt(e3c),
 		.layer_start(layer_start), .layer_end(layer_end), .busy(unused_busy), .done(done),
 		.pkt_valid(pkt_valid), .pkt_ready(pkt_ready), .pkt_data(pkt_data), .pkt_addr(pkt_addr), .pkt_be(pkt_be),
 		.pkt_row(pkt_row), .pkt_col(pkt_col), .pkt_chan(pkt_chan), .pkt_last(pkt_last),
@@ -146,7 +152,8 @@ module tb_vu_iss;
 					tagv = ({28'd0, v} << ((icol >> ia_l) & 3)) & 32'hF;
 				end
 				4'd8: tagv = {24'd0, 1'b0, ichan[1:0], 5'd0} + {26'd0, icol[7:2]};
-				default: tagv = (t > 4'd8) ? 32'd0 : {21'd0, itag(t[2:0])};
+				4'd9: tagv = iiter;
+				default: tagv = (t > 4'd9) ? 32'd0 : {21'd0, itag(t[2:0])};
 			endcase
 		end
 	endfunction
@@ -327,6 +334,23 @@ module tb_vu_iss;
 		for (i = 0; i < len; i = i + 1) iss_exec(prog_mem[start + i]);
 	endtask
 
+	function integer reps(input [8:0] c);
+		reps = (c == 9'd0) ? 1 : {23'd0, c};
+	endfunction
+
+	// a repeated section: iter = 0 .. max(cnt,1)-1; iter is 0 again afterwards (and during the body)
+	task iss_repeat(input [31:0] start, input [31:0] len, input [31:0] cnt);
+		integer r;
+		begin
+			if (len != 0)
+				for (r = 0; r < ((cnt == 0) ? 1 : cnt); r = r + 1) begin
+					iiter = r;
+					iss_section(start, len);
+				end
+			iiter = 0;
+		end
+	endtask
+
 	task iss_reset;
 		integer i;
 		begin
@@ -344,7 +368,7 @@ module tb_vu_iss;
 	endtask
 
 	// ================================================================ random program generator
-	integer pro_n, body_n, epi_n, cur_prog;
+	integer pro_n, body_n, epi_n, e1n, e2n, e3n, cur_prog;
 	integer op_hist [0:63];
 
 	function [31:0] rnd_ins(input integer must_store);
@@ -375,7 +399,7 @@ module tb_vu_iss;
 				58: op = 6'h3D; default: op = 6'h0B;
 			endcase
 			if (op == 6'h09 && x[5:0] > 6'd47) x[5:0] = x[5:0] - 6'd16;
-			if (op == 6'h08 && ({$random} % 2) == 1) x[3:0] = 4'(6 + {$random} % 3);
+			if (op == 6'h08 && ({$random} % 2) == 1) x[3:0] = 4'(6 + {$random} % 4);
 			op_hist[op] = op_hist[op] + 1;
 			k = {$random} % 10;
 			rnd_ins = {op, (k < 5) ? 3'd0 : ((k < 7) ? 3'd1 : 3'(2 + {$random} % 6)), d, a, b, x};
@@ -386,13 +410,17 @@ module tb_vu_iss;
 		integer i;
 		begin
 			pro_n  = 2 + {$random} % 10;
-			body_n = 1 + {$random} % 24;
-			epi_n  = {$random} % 8;
+			body_n = 1 + {$random} % 20;
+			epi_n  = {$random} % 6;
+			e1n    = (({$random} % 2) == 1) ? 1 + {$random} % 5 : 0;
+			e2n    = (({$random} % 3) == 1) ? 1 + {$random} % 5 : 0;
+			e3n    = (({$random} % 3) == 1) ? 1 + {$random} % 5 : 0;
 			for (i = 0; i < pro_n; i = i + 1)  prog_mem[i] = rnd_ins(0);
 			for (i = 0; i < body_n; i = i + 1) prog_mem[pro_n + i] = rnd_ins(({$random} % 4 == 0) ? 1 : 0);
 			prog_mem[pro_n + body_n - 1] = rnd_ins(1);
-			for (i = 0; i < epi_n; i = i + 1)  prog_mem[pro_n + body_n + i] = rnd_ins(({$random} % 3 == 0) ? 1 : 0);
-			for (i = pro_n + body_n + epi_n; i < 64; i = i + 1) prog_mem[i] = 32'h0;
+			for (i = 0; i < epi_n + e1n + e2n + e3n; i = i + 1)
+				prog_mem[pro_n + body_n + i] = rnd_ins(({$random} % 3 == 0) ? 1 : 0);
+			for (i = pro_n + body_n + epi_n + e1n + e2n + e3n; i < 64; i = i + 1) prog_mem[i] = 32'h0;
 		end
 	endtask
 
@@ -542,7 +570,7 @@ module tb_vu_iss;
 				p_last[i] = ({$random} % 4) == 0;
 			end
 
-			for (i = 0; i < pro_n + body_n + epi_n; i = i + 1) begin
+			for (i = 0; i < pro_n + body_n + epi_n + e1n + e2n + e3n; i = i + 1) begin
 				@(negedge clk);
 				pm_we    = 1'b1;
 				pm_waddr = i[5:0];
@@ -556,6 +584,14 @@ module tb_vu_iss;
 			body_len   = body_n[6:0];
 			epi_start  = 6'(pro_n + body_n);
 			epi_len    = epi_n[6:0];
+			e1s = 6'(pro_n + body_n + epi_n);             e1l = e1n[6:0];
+			e2s = 6'(pro_n + body_n + epi_n + e1n);       e2l = e2n[6:0];
+			e3s = 6'(pro_n + body_n + epi_n + e1n + e2n); e3l = e3n[6:0];
+			pro_cnt = 9'({$random} % 4);
+			epi_cnt = 9'({$random} % 4);
+			e1c = 9'({$random} % 6);
+			e2c = 9'({$random} % 6);
+			e3c = (({$random} % 4) == 0) ? 9'(20 + {$random} % 40) : 9'({$random} % 4);
 
 			iss_reset;
 			for (i = 0; i < 7; i = i + 1)  iv[i] = dut.u_regs.vreg[i];
@@ -572,7 +608,7 @@ module tb_vu_iss;
 			for (i = 2; i < 8; i = i + 1) begin
 				ipt_tag[i] = dut.pt_tag[i]; ipt_op[i] = dut.pt_op[i]; ipt_val[i] = dut.pt_val[i];
 			end
-			iss_section(0, pro_n);
+			iss_repeat(0, pro_n, {23'd0, pro_cnt});
 
 			p_idx = 0;
 			avail_pct = 20 + {$random} % 81;
@@ -582,7 +618,10 @@ module tb_vu_iss;
 			@(negedge clk);
 			layer_start = 1'b0;
 			while (p_idx < NPKT) @(negedge clk);
-			iss_section(pro_n + body_n, epi_n);
+			iss_repeat(pro_n + body_n, epi_n, {23'd0, epi_cnt});
+			iss_repeat({26'd0, e1s}, e1n, {23'd0, e1c});
+			iss_repeat({26'd0, e2s}, e2n, {23'd0, e2c});
+			iss_repeat({26'd0, e3s}, e3n, {23'd0, e3c});
 			layer_end = 1'b1;
 			@(negedge clk);
 			layer_end = 1'b0;
@@ -593,7 +632,8 @@ module tb_vu_iss;
 				if (i > 50000) $fatal(1, "program %0d: done never arrived", cur_prog);
 			end
 			busy_cycles = busy_cycles + (cyc - t0);
-			issued      = issued + pro_n + NPKT * body_n + epi_n;
+			issued      = issued + pro_n * reps(pro_cnt) + NPKT * body_n
+			            + epi_n * reps(epi_cnt) + e1n * reps(e1c) + e2n * reps(e2c) + e3n * reps(e3c);
 			repeat (2) @(negedge clk);
 			check_state;
 		end
@@ -609,10 +649,11 @@ module tb_vu_iss;
 
 		errors = 0; stores = 0; state_err = 0; cyc = 0; busy_cycles = 0; issued = 0;
 		e_head = 0; e_tail = 0; p_idx = NPKT; avail = 1'b0; avail_pct = 100; cur_prog = 0;
-		pro_n = 0; body_n = 0; epi_n = 0;
+		pro_n = 0; body_n = 0; epi_n = 0; e1n = 0; e2n = 0; e3n = 0;
 		for (n = 0; n < 64; n = n + 1) op_hist[n] = 0;
 		pm_we = 1'b0; pm_waddr = 0; pm_wdata = 0;
 		pro_start = 0; pro_len = 0; body_start = 0; body_len = 0; epi_start = 0; epi_len = 0;
+		pro_cnt = 0; epi_cnt = 0; e1s = 0; e1l = 0; e1c = 0; e2s = 0; e2l = 0; e2c = 0; e3s = 0; e3l = 0; e3c = 0; iiter = 0;
 		layer_start = 1'b0; layer_end = 1'b0;
 		for (n = 0; n < NPKT; n = n + 1) begin
 			p_data[n] = 0; p_addr[n] = 0; p_be[n] = 0;
