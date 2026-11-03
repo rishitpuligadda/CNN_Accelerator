@@ -372,7 +372,9 @@ module tb_accel_top;
 	integer vu_mode, force_mode, obuf_checked, obuf_err, q_m, q_mn, q_s;
 	integer np_v;
 	reg [31:0] prg_v [0:63];
-	integer s_pro_l, s_body_l, s_body_s;
+	integer s_pro_l, s_body_l, s_body_s, s_e0_s, s_e1_s, s_e2_s, s_e3_s;
+	reg [15:0] exp_tab [0:255];
+	localparam real SM_STEP = 0.1;     // real value of one int8 logit step, for the exp table
 
 	function [31:0] venc(input [5:0] op, input [2:0] pr, input [3:0] d, input [3:0] a, input [3:0] b, input [10:0] x);
 		venc = {op, pr, d, a, b, x};
@@ -436,6 +438,17 @@ module tb_accel_top;
 				vemit(venc(6'h0C, 3'd0, 4'd2, 4'd0, 4'd1, {6'd0, 2'd2, 3'd2}));    // SETP P2: row, low 1 bit == 0
 				vemit(venc(6'h0C, 3'd0, 4'd3, 4'd0, 4'd1, {6'd1, 2'd2, 3'd2}));    // SETP P3: row, low 1 bit == 1
 			end
+			if (vu_mode == 4) begin
+				vemit({6'h01, 3'd0, 4'd4, 19'd0});                     // LI s4, 0
+				vemit(venc(6'h0A, 3'd0, 4'd2, 4'd3, 4'd4, 11'd0));     // SETC c2, s3, s4   (-128..0)
+				vemit({6'h01, 3'd0, 4'd3, 19'd0});                     // LI s3, 0
+				vemit({6'h01, 3'd0, 4'd4, 19'd127});                   // LI s4, 127
+				vemit(venc(6'h0A, 3'd0, 4'd1, 4'd3, 4'd4, 11'd0));     // SETC c1, s3, s4   (0..127)
+				vemit(venc(6'h11, 3'd0, 4'd6, 4'd0, 4'hF, 11'h780));   // VLI v6, -128      (imm15 = {b, x} = 0x7F80)
+				vemit(venc(6'h11, 3'd0, 4'd5, 4'd0, 4'd0, 11'd0));     // VLI v5, 0         (running sum)
+				vemit({6'h01, 3'd0, 4'd10, 19'd1});                    // LI s10, 1         (output base)
+				vemit({6'h01, 3'd0, 4'd11, 19'd1});                    // LI s11, 1         (byte mask)
+			end
 			s_pro_l  = np_v;
 			s_body_s = np_v;
 			vemit(venc(6'h21, 3'd0, 4'd0, 4'd7, 4'd0, 11'd0));    // REQ v0, v7, q0
@@ -451,15 +464,52 @@ module tb_accel_top;
 				vemit(venc(6'h08, 3'd0, 4'd5, 4'd0, 4'd0, 11'd7));    // TAG s5, pbe
 				vemit(venc(6'h39, 3'd3, 4'd5, 4'd1, 4'd9, 11'd0));    // [p3] ST8A v1, s9, s5, c0
 			end
+			else if (vu_mode == 4) begin
+				vemit(venc(6'h22, 3'd0, 4'd0, 4'd0, 4'd0, 11'd0));    // CLAMP v0, v0, c0      int8 logit
+				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd4));    // TAG s1, chan          class number
+				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd0, 4'd1, 11'd0));    // STS v0, s1            logit -> local memory
+				vemit(venc(6'h1B, 3'd0, 4'd6, 4'd6, 4'd0, 11'd0));    // MAX v6, v6, v0        running max
+			end
 			else begin
 				vemit(venc(6'h38, 3'd0, 4'd0, 4'd0, 4'd0, 11'd0));    // ST8 v0, c0
 				if (vu_mode == 3) for (i = 0; i < 38; i = i + 1) vemit(32'h0);   // NOPs: a deliberately slow consumer
 			end
 			s_body_l = np_v - s_body_s;
+			if (vu_mode == 4) begin
+				s_e0_s = np_v;                                        // epilogue 0, once per class
+				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd9));    // TAG s1, iter
+				vemit(venc(6'h3B, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));    // LDS v1, s1
+				vemit(venc(6'h19, 3'd0, 4'd1, 4'd1, 4'd6, 11'd0));    // SUB v1, v1, v6        d = logit - max
+				vemit(venc(6'h22, 3'd0, 4'd1, 4'd1, 4'd0, 11'd2));    // CLAMP v1, v1, c2      -128..0
+				vemit(venc(6'h23, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));    // LUT v1, v1            exp(d), Q15
+				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd1, 4'd1, 11'd0));    // STS v1, s1
+				vemit(venc(6'h18, 3'd0, 4'd5, 4'd5, 4'd1, 11'd0));    // ADD v5, v5, v1        running sum
+				s_e1_s = np_v;                                        // epilogue 1, once
+				vemit(venc(6'h33, 3'd0, 4'd2, 4'd5, 4'd0, 11'd0));    // RADD s2, v5
+				vemit(venc(6'h0B, 3'd0, 4'd3, 4'd2, 4'd0, 11'd30));   // RCP s3, s2, 30
+				vemit(venc(6'h12, 3'd0, 4'd4, 4'd3, 4'd0, 11'd0));    // BCAST v4, s3
+				s_e2_s = np_v;                                        // epilogue 2, once per class
+				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd9));    // TAG s1, iter
+				vemit(venc(6'h3B, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));    // LDS v1, s1
+				vemit(venc(6'h20, 3'd0, 4'd2, 4'd4, 4'd1, 11'd0));    // MUL v2, v4, v1        e x 2^30/sum
+				vemit(venc(6'h1F, 3'd0, 4'd2, 4'd2, 4'd0, 11'd23));   // SHRR v2, v2, 23       probability x 128
+				vemit(venc(6'h04, 3'd0, 4'd5, 4'd10, 4'd1, 11'd0));   // ADDS s5, s10, s1
+				vemit(venc(6'h39, 3'd0, 4'd11, 4'd2, 4'd5, 11'd1));   // ST8A v2, s5, s11, c1
+				s_e3_s = np_v;
+				for (i = 0; i < 256; i = i + 1) vcfg(10'h100 + i[9:0], {16'd0, exp_tab[i]});
+			end
 			for (i = 0; i < np_v; i = i + 1) vcfg(i[9:0], prg_v[i]);
 			vcfg(10'h040, 0);        vcfg(10'h041, s_pro_l);  vcfg(10'h042, 1);
 			vcfg(10'h043, s_body_s); vcfg(10'h044, s_body_l);
-			vcfg(10'h046, 0);        vcfg(10'h049, 0);        vcfg(10'h04C, 0);  vcfg(10'h04F, 0);
+			if (vu_mode == 4) begin
+				vcfg(10'h045, s_e0_s); vcfg(10'h046, s_e1_s - s_e0_s); vcfg(10'h047, L_F);
+				vcfg(10'h048, s_e1_s); vcfg(10'h049, s_e2_s - s_e1_s); vcfg(10'h04A, 1);
+				vcfg(10'h04B, s_e2_s); vcfg(10'h04C, s_e3_s - s_e2_s); vcfg(10'h04D, L_F);
+				vcfg(10'h04F, 0);
+			end
+			else begin
+				vcfg(10'h046, 0);    vcfg(10'h049, 0);        vcfg(10'h04C, 0);  vcfg(10'h04F, 0);
+			end
 		end
 	endtask
 
@@ -491,8 +541,81 @@ module tb_accel_top;
 		end
 	endtask
 
+	// softmax over the classes (1x1xC output): bit-exact reference of the program, plus float softmax
+	task check_softmax(input integer loud);
+		integer i, m, e0;
+		reg signed [31:0] lg [0:63];
+		reg signed [31:0] ex [0:63];
+		reg signed [31:0] r, sum, rr, q, d;
+		reg [63:0] q64;
+		reg [31:0] wd;
+		reg signed [7:0] hv;
+		real fsum, fp, perr, maxerr;
+		begin
+			e0 = obuf_err;
+			m = -128;
+			for (i = 0; i < L_F; i = i + 1) begin
+				lg[i] = q8(i, 0, 0);
+				if (lg[i] > m) m = lg[i];
+			end
+			sum = 0;
+			for (i = 0; i < L_F; i = i + 1) begin
+				d = lg[i] - m;
+				if (d < -128) d = -128;
+				ex[i] = {16'd0, exp_tab[d[7:0]]};
+				sum = sum + ex[i];
+			end
+			q64 = (64'd1 << 30) / {32'd0, sum};
+			if (q64[63:32] != 32'd0) $fatal(1, "softmax reference: reciprocal wider than 32 bits");
+			rr  = q64[31:0];
+			fsum = 0.0;
+			for (i = 0; i < L_F; i = i + 1) fsum = fsum + $exp(lg[i] * SM_STEP);
+			maxerr = 0.0;
+			if (loud != 0) $write("      class:            ");
+			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5d", i);
+			if (loud != 0) $display("");
+			if (loud != 0) $write("      logit (int8):     ");
+			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5d", lg[i]);
+			if (loud != 0) $display("");
+			if (loud != 0) $write("      softmax (float):  ");
+			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5.3f", $exp(lg[i] * SM_STEP) / fsum);
+			if (loud != 0) $display("");
+			if (loud != 0) $write("      buffer B (q/128): ");
+			for (i = 0; i < L_F; i = i + 1) begin
+				q64 = {32'd0, rr} * {32'd0, ex[i]};
+				if (q64[63:32] != 32'd0) $fatal(1, "softmax reference: product wider than 32 bits");
+				r   = q64[31:0];
+				q   = (r >>> 23) + ((r >>> 22) & 1);
+				if (q > 127) q = 127;
+				ob_read(ADDR'(1 + i), wd);
+				if (wd[31:8] === 24'hx) $display("note: upper bytes of class word %0d unknown", i);
+				hv = wd[7:0];
+				obuf_checked = obuf_checked + 1;
+				if ({{24{hv[7]}}, hv} != q) begin
+					obuf_err = obuf_err + 1;
+					if (obuf_err - e0 <= 5) $display("FAIL softmax class %0d = %0d, expected %0d", i, hv, q);
+				end
+				if (loud != 0) $write(" %5.3f", hv / 128.0);
+				fp  = $exp(lg[i] * SM_STEP) / fsum;
+				perr = hv / 128.0 - fp;
+				if (perr < 0.0) perr = -perr;
+				if (perr > maxerr) maxerr = perr;
+			end
+			if (loud != 0) $display("");
+			$display("      softmax of %0d classes in buffer B: largest difference from float softmax %0.4f, %0d wrong",
+			         L_F, maxerr, obuf_err - e0);
+		end
+	endtask
+
 	// every stored int8 value in buffer B against the reference (requantized, and pooled in mode 2)
 	task check_obuf(input integer loud);
+		begin
+			if (vu_mode == 4) check_softmax(loud);
+			else check_maps(loud);
+		end
+	endtask
+
+	task check_maps(input integer loud);
 		integer f, y, x, oh_s, ow_s, rp_s, ch_s, e, k, mx, e0, hvi;
 		reg [ADDR-1:0] wa;
 		reg [31:0] wd;
@@ -582,7 +705,8 @@ module tb_accel_top;
 			if (loud != 0)
 				$display("    vector unit: %0s, M = %0d, S = %0d; int8 result in buffer B (filter 0, top-left corner):",
 				         (vu_mode == 0) ? "requantize" : ((vu_mode == 1) ? "requantize + ReLU" :
-				         ((vu_mode == 2) ? "requantize + ReLU + 2x2 max pooling" : "requantize, 40-instruction body")), q_m, q_s);
+				         ((vu_mode == 2) ? "requantize + ReLU + 2x2 max pooling" :
+				         ((vu_mode == 4) ? "requantize, then softmax over the classes" : "requantize, 40-instruction body"))), q_m, q_s);
 			check_obuf(loud);
 
 			missing = 0;
@@ -661,6 +785,9 @@ module tb_accel_top;
 
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
 		vcfg_we = 1'b0; vcfg_addr = 10'd0; vcfg_data = 32'd0; ob_rd_en = 1'b0; ob_rd_addr = {ADDR{1'b0}}; pool = 2'd0;
+		for (n = 0; n < 256; n = n + 1)
+			exp_tab[n] = 16'($rtoi(32767.0 * $exp(((n < 128) ? 0 : n - 256) * SM_STEP) + 0.5));
+		s_e0_s = 0; s_e1_s = 0; s_e2_s = 0; s_e3_s = 0;
 		vu_mode = 0; force_mode = -1; obuf_checked = 0; obuf_err = 0; q_m = 1; q_mn = 1; q_s = 0; np_v = 0;
 		s_pro_l = 0; s_body_l = 0; s_body_s = 0;
 		q_head = 0; q_tail = 0; mon_err = 0; pkts = 0;
@@ -755,6 +882,25 @@ module tb_accel_top;
 		for (n = 0; n < 4; n = n + 1) begin
 			force_mode = (n % 2 == 0) ? 2 : 3;
 			run(4 + {$random} % 12, 4 + {$random} % 12, 1 + {$random} % 4, 1 + {$random} % 9, 3, 3, 1, 1 + {$random} % 2, 0);
+		end
+		force_mode = -1;
+
+		$display("");
+		$display("5b) Classifier layers: the array computes the logits (an FC layer), the vector unit requantizes them");
+		$display("    and runs softmax over the classes; the probabilities (x128) are read back from buffer B:");
+		force_mode = 4;
+		run(7, 7, 16, 10, 7, 7, 0, 1, 1);
+		run(1, 1, 64, 10, 1, 1, 0, 1, 1);
+		run(4, 4, 8, 32, 4, 4, 0, 1, 1);
+		run(3, 3, 32, 2, 3, 3, 0, 1, 0);
+		run(2, 2, 16, 64, 2, 2, 0, 1, 0);
+		for (n = 0; n < 4; n = n + 1) begin
+			rh = 1 + {$random} % 5;                          // FC layer: kernel = whole input -> 1x1xC logits
+			rw = 1 + {$random} % 5;
+			rc = 1 + {$random} % 32;
+			while (rc * rh * rw > 1020) rc = rc - 1;
+			rf = 1 + {$random} % 64;
+			run(rh, rw, rc, rf, rh, rw, 0, 1, 0);
 		end
 		force_mode = -1;
 

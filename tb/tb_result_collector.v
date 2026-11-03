@@ -11,7 +11,7 @@ module tb_result_collector;
 
 	reg                  clk, rst_n;
 	reg                  en, first_k, last_k;
-	reg  [N*ACC_W-1:0]   bias_r;
+	reg  [N*ACC_W-1:0]   bias_r, bias_saved;
 	reg  [N*WIDTH-1:0]   act_lanes, wgt_lanes;
 	wire [N*WIDTH-1:0]   act_sk, wgt_sk;
 	wire [N*ACC_W-1:0]   c_col;
@@ -272,7 +272,10 @@ module tb_result_collector;
 		$display("1) One tile, M = 4, small values: activations A[i][k] = i+k, weights B[k][j] = j+1");
 		$display("   row sums of A are 6, 10, 14, 18, so column j's results are (j+1) x those;");
 		$display("   tile address 100, channel pitch 49 words, so column j's packet goes to 100 + 49j");
+		$display("   (bias 0 for this tile, so the results are exactly the products; all later sections use random biases)");
 		$display("   cyc | en  | array columns 0..3 |  packet out");
+		bias_saved = bias_r;
+		bias_r = {(N*ACC_W){1'b0}};
 		@(negedge clk);
 		trace = 1'b1;
 		tile(4, 15, 15, 100, 1, 1);
@@ -282,6 +285,7 @@ module tb_result_collector;
 		drain;
 		$display("   each column delivers rows r0..r3 on consecutive cycles, one column behind the other;");
 		$display("   a packet leaves the cycle after a column's r3, carrying all 4 rows of that column");
+		bias_r = bias_saved;                     // the array is drained, so the bias may change now
 
 		$display("");
 		$display("2) Tiles back to back with NO gap (first/last flags mark the tiles); for M = 1, 2, 3 idle cycles are");
