@@ -14,7 +14,11 @@ module tb_model;
 
 	`include "model/model_params.vh"
 
-	localparam PER_IMG_MAP = 4096 * 2; // generous upper bound of all maps of one image
+	localparam PER_IMG_MAP = MAP_BYTES;   // bytes of all stored maps of one image
+	localparam IMG_RP = (IMG_W + 3) / 4 * 4;
+	localparam WIDE   = (IMG_W > 16);                      // one character per pixel for big images
+	localparam COLW   = WIDE ? IMG_W + 4 : 2 * IMG_W + 4;  // gallery column width
+	localparam PER_ROW = (120 / COLW < 1) ? 1 : ((120 / COLW > 6) ? 6 : 120 / COLW);
 
 	reg                 clk, rst_n, start;
 	wire                busy, done, err_valid;
@@ -123,26 +127,32 @@ module tb_model;
 	reg signed [7:0] hv, ev;
 
 
-	// one row of the gallery: up to 6 digits side by side, with label, chip prediction and top-2 probabilities
+	// one row of the gallery: digits side by side, with label, chip prediction and top-2 outputs (channel 0 drawn)
 	function [15:0] pix2(input integer n, input integer yy, input integer xx);
 		integer b;
-		reg [7:0] px;
+		reg signed [7:0] px;
 		begin
-			b  = 4 + yy * 8 + xx;
+			b  = 4 + yy * IMG_RP + xx;
 			px = images[n * IMG_WORDS + b / 4][(b % 4) * 8 +: 8];
-			if (px > 90)      pix2 = "##";
-			else if (px > 45) pix2 = "++";
-			else if (px > 12) pix2 = "..";
+			if (px > 90)      pix2 = WIDE ? " #" : "##";
+			else if (px > 45) pix2 = WIDE ? " +" : "++";
+			else if (px > 12) pix2 = WIDE ? " ." : "..";
 			else              pix2 = "  ";
 		end
 	endfunction
 
+	task spaces(input integer fd, input integer n);
+		integer t;
+		for (t = 0; t < n; t = t + 1) $fwrite(fd, " ");
+	endtask
+
 	task gallery_row(input integer fd, input integer list_n, input integer only_wrong, inout integer from, input integer upto);
 		integer sel [0:5];
 		integer ns, j, yy, xx, b1, b2, m;
+		reg [15:0] pc;
 		begin
 			ns = 0;
-			while (ns < 6 && from < upto) begin
+			while (ns < PER_ROW && from < upto) begin
 				if (only_wrong == 0 || res_pred[from] != res_label[from]) begin
 					sel[ns] = from;
 					ns = ns + 1;
@@ -150,29 +160,43 @@ module tb_model;
 				from = from + 1;
 			end
 			if (ns != 0) begin
-				for (j = 0; j < ns; j = j + 1) $fwrite(fd, "  image %3d         ", sel[j]);
+				for (j = 0; j < ns; j = j + 1) begin
+					$fwrite(fd, "  image %4d", sel[j]);
+					spaces(fd, COLW - 12);
+				end
 				$fwrite(fd, "\n");
-				for (yy = 0; yy < 8; yy = yy + 1) begin
+				for (yy = 0; yy < IMG_H; yy = yy + 1) begin
 					for (j = 0; j < ns; j = j + 1) begin
 						$fwrite(fd, "  ");
-						for (xx = 0; xx < 8; xx = xx + 1) $fwrite(fd, "%s", pix2(sel[j], yy, xx));
+						for (xx = 0; xx < IMG_W; xx = xx + 1) begin
+							pc = pix2(sel[j], yy, xx);
+							if (WIDE) $fwrite(fd, "%c", pc[7:0]);
+							else      $fwrite(fd, "%s", pc);
+						end
 						$fwrite(fd, "  ");
 					end
 					$fwrite(fd, "\n");
 				end
-				for (j = 0; j < ns; j = j + 1)
+				for (j = 0; j < ns; j = j + 1) begin
 					$fwrite(fd, "  label %0d chip %0d %0s", res_label[sel[j]], res_pred[sel[j]],
 					        (res_pred[sel[j]] == res_label[sel[j]]) ? "   " : " <-");
+					spaces(fd, COLW - 20);
+				end
 				$fwrite(fd, "\n");
 				for (j = 0; j < ns; j = j + 1) begin
-					b1 = 0; b2 = 1;                       // the two largest probabilities
+					b1 = 0; b2 = 1;                       // the two largest outputs
 					for (m = 0; m < NCLASS; m = m + 1)
-						if (res_prob[sel[j] * NCLASS + m] > res_prob[sel[j] * NCLASS + b1]) b1 = m;
+						if ($signed(res_prob[sel[j] * NCLASS + m]) > $signed(res_prob[sel[j] * NCLASS + b1])) b1 = m;
 					if (b2 == b1) b2 = 0;
 					for (m = 0; m < NCLASS; m = m + 1)
-						if (m != b1 && res_prob[sel[j] * NCLASS + m] > res_prob[sel[j] * NCLASS + b2]) b2 = m;
-					$fwrite(fd, "  %0d:%4.2f  %0d:%4.2f    ", b1, res_prob[sel[j] * NCLASS + b1] / 128.0,
-					        b2, res_prob[sel[j] * NCLASS + b2] / 128.0);
+						if (m != b1 && $signed(res_prob[sel[j] * NCLASS + m]) > $signed(res_prob[sel[j] * NCLASS + b2])) b2 = m;
+					if (SOFTMAX)
+						$fwrite(fd, "  %0d:%4.2f  %0d:%4.2f  ", b1, res_prob[sel[j] * NCLASS + b1] / 128.0,
+						        b2, res_prob[sel[j] * NCLASS + b2] / 128.0);
+					else
+						$fwrite(fd, "  %0d:%4d  %0d:%4d  ", b1, $signed(res_prob[sel[j] * NCLASS + b1]),
+						        b2, $signed(res_prob[sel[j] * NCLASS + b2]));
+					spaces(fd, COLW - 18);
 				end
 				$fwrite(fd, "\n\n");
 			end
@@ -210,7 +234,7 @@ module tb_model;
 		mem_on = 1'b1;
 
 		$display("");
-		$display("The trained CNN on the chip: %0d layers, %0d test images (8x8 handwritten digits), one start per image.", NL, NIMG);
+		$display("The trained CNN on the chip: %0d layers, %0d test images (%0dx%0dx%0d), one start per image.", NL, NIMG, IMG_H, IMG_W, IMG_C);
 		$display("Every layer's stored int8 map and the written-back probabilities are compared with the Python golden model.");
 		$display("");
 
@@ -229,7 +253,7 @@ module tb_model;
 			while (!done) begin
 				@(negedge clk);
 				i = i + 1;
-				if (i > 200000) $fatal(1, "image %0d never finished", img);
+				if (i > 5000000) $fatal(1, "image %0d never finished", img);
 			end
 			if (err_valid) $fatal(1, "image %0d: a layer was rejected, err = %b", img, err);
 			cycles_total = cycles_total + (cyc - t0);
@@ -261,7 +285,7 @@ module tb_model;
 					nprob_err = nprob_err + 1;
 					if (nprob_err <= 5) $display("FAIL image %0d class %0d: chip %0d, golden %0d", img, i, hv, ev);
 				end
-				if ($signed(ext_mem[WB_EB + 1 + i][7:0]) > $signed(ext_mem[WB_EB + 1 + best][7:0])) best = i;
+				if ($signed(ext_mem[WB_EB + 1 + i][7:0]) > $signed(ext_mem[WB_EB + 1 + best][7:0])) best = i;   // first largest
 			end
 			pred = best;
 			if (pred == label) hw_correct = hw_correct + 1;
@@ -277,10 +301,10 @@ module tb_model;
 		end
 
 		// the gallery: the first images (or all with +all), then every misclassified one; everything in a file
-		show_n = $test$plusargs("all") ? NIMG : 60;
+		show_n = ($test$plusargs("all") || NIMG < 60) ? NIMG : 60;
 		$display("");
-		$display("The first %0d test images as the chip saw them (8x8, ## dark .. faint), with label, chip prediction", show_n);
-		$display("and the chip's two largest probabilities (<- marks a misclassified digit):");
+		$display("The first %0d test images as the chip saw them (%0dx%0d, # dark . faint), with label, chip prediction", show_n, IMG_H, IMG_W);
+		$display("and the chip's two largest %0s (<- marks a misclassified digit):", SOFTMAX ? "probabilities" : "logits");
 		$display("");
 		gallery(32'h8000_0001, 0, show_n);
 		n_wrong = 0;
@@ -305,14 +329,15 @@ module tb_model;
 		$display("");
 		$display("Accuracy on %0d test images:", NIMG);
 		$display("    float model (Python)              %0d.%02d%%", FLOAT_ACC_X10000 / 100, FLOAT_ACC_X10000 % 100);
-		$display("    integer golden model (Python)     %0d.%02d%%  (%0d correct)", INT_ACC_X10000 / 100, INT_ACC_X10000 % 100, gold_correct);
+		$display("    integer golden model (Python)     %0d.%02d%%  (%0d of the %0d the chip ran)", INT_ACC_X10000 / 100, INT_ACC_X10000 % 100, gold_correct, NIMG);
 		$display("    the chip (RTL)                    %0d correct = %0d.%02d%%", hw_correct,
 		         hw_correct * 100 / NIMG, (hw_correct * 10000 / NIMG) % 100);
 		$display("    chip and golden model predict the same class on %0d of %0d images", agree, NIMG);
 		$display("    %0d layer-map bytes and %0d probabilities differ from the golden model", nmap_err, nprob_err);
 		$display("    %0d cycles per image on average (%0.1f us at 100 MHz)", cycles_total / NIMG, cycles_total / NIMG / 100.0);
+		$display("    (accuracies of the Python models are over all their test images; the chip's over the %0d it ran)", NIMG);
 		$display("");
-		if (nmap_err + nprob_err != 0 || agree != NIMG || hw_correct != gold_correct) $fatal(1, "FAIL");
+		if (nmap_err + nprob_err != 0 || agree != NIMG) $fatal(1, "FAIL");
 		$display("PASS: the chip computes exactly what the golden model computes, on every layer of every image");
 		$finish;
 	end

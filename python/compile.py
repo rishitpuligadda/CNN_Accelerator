@@ -8,7 +8,7 @@ Files written:
   expmaps.hex     per image: every layer's stored int8 map, one byte per line, in (channel, row, column) order
 """
 import numpy as np
-from model import LAYERS
+import chipnet
 
 IMG_EB, WGT_EB, TBL_EB, WB_EB = 0, 4096, 49152, 57344
 
@@ -24,9 +24,10 @@ def LI(d, v):
 
 
 def program(L, ql, out_h, out_w):
-    """Vector-unit program for one layer, returning (words, sections) like the RTL tests build them."""
+    """Vector-unit program for one layer, returning (words, sections, mode) like the RTL tests build them.
+    mode 1: requantize (+ ReLU) and store; 2: requantize (+ ReLU) + 2x2 max pooling; 4: requantize + softmax."""
     p = []
-    mode = 4 if L["kind"] == "fc" else (2 if L["pool"] else 1)
+    mode = 4 if L["softmax"] else (2 if L["pool"] else 1)
     p += [LI(1, ql["M"]), LI(2, ql["M_neg"]), venc(0x09, 0, 0, 1, 2, ql["S"]),     # SETQ q0
           LI(3, -128), LI(4, 127), venc(0x0A, 0, 0, 3, 4, 0)]                       # SETC c0 = int8
     if mode == 2:
@@ -88,25 +89,15 @@ def program(L, ql, out_h, out_w):
     return p, sections, mode
 
 
-def check_limits(L, h, w):
-    if L["k"] > 7:
-        raise ValueError("kernels are at most 7x7 (the map before an FC layer must be at most 7x7)")
-    if L["cin"] * L["k"] * L["k"] > 1020:
-        raise ValueError("channels x kernel x kernel must be at most 1020")
-    if L["cout"] > 255:
-        raise ValueError("at most 255 filters")
-
-
-def compile_network(q, table, in_h=8, in_w=8):
+def compile_network(layers, q, table, in_c, in_h, in_w):
+    chipnet.check_limits(layers, in_c, in_h, in_w)
     mem = {}
     entries = []
     wptr, tptr = WGT_EB, TBL_EB
     h, w = in_h, in_w
-    n = len(LAYERS)
-    for li, (L, ql) in enumerate(zip(LAYERS, q)):
-        check_limits(L, h, w)
-        oh, ow = h + 2 * L["pad"] - L["k"] + 1, w + 2 * L["pad"] - L["k"] + 1
-        sh, sw = (oh // 2, ow // 2) if L["pool"] else (oh, ow)
+    n = len(layers)
+    for li, (L, ql) in enumerate(zip(layers, q)):
+        oh, ow, sh, sw = chipnet.out_shape(L, h, w)
         # weights: per group of 4 filters, 4 bias words, then M words {w3[k], w2[k], w1[k], w0[k]}
         wq = ql["wq"].reshape(L["cout"], -1)
         m = wq.shape[1]
@@ -126,11 +117,11 @@ def compile_network(q, table, in_h=8, in_w=8):
         prog, sects, mode = program(L, ql, sh, sw)
         nlut = 256 if mode == 4 else 0
         last = li == n - 1
-        wb_words = 1 + L["cout"] * sh * ((sw + 3) // 4)
+        wb_words = chipnet.map_words(L["cout"], sh, sw)
         hdr = [
             (L["cout"] << 24) | (L["cin"] << 16) | (w << 8) | h,
             (int(last) << 18) | (int(last) << 17) | (int(li == 0) << 16) | ((1 if L["pool"] else 0) << 12)
-            | (1 << 9) | (L["pad"] << 6) | (L["k"] << 3) | L["k"],
+            | (L["stride"] << 9) | (L["pad"] << 6) | (L["kw"] << 3) | L["kh"],
             (1 << 16) | waddr,
             (WB_EB << 16) | IMG_EB,
             (wb_words << 12),
@@ -143,8 +134,10 @@ def compile_network(q, table, in_h=8, in_w=8):
                             out=(sh, sw, L["cout"]), wgt=waddr, wgt_words=wptr - waddr))
         tptr += len(words)
         h, w = sh, sw
-    if wptr > TBL_EB or tptr > WB_EB:
-        raise ValueError("weights or table do not fit the memory map")
+    if wptr > TBL_EB:
+        raise ValueError(f"the weights need {wptr - WGT_EB} words, the memory map has {TBL_EB - WGT_EB}")
+    if tptr > WB_EB:
+        raise ValueError("the layer table does not fit the memory map")
     return mem, entries
 
 
@@ -170,3 +163,89 @@ def write_hex_mem(path, mem):
                 f.write(f"@{a:04x}\n")
             f.write(f"{mem[a]:08x}\n")
             last = a
+
+
+def write_files(outdir, layers, entries, images, labels, results, float_acc, int_acc, n_rtl=None):
+    """Everything tb_model.v needs. images: int8 (N, C, H, W); results: golden() per image."""
+    import os
+    os.makedirs(outdir, exist_ok=True)
+    n = len(images) if n_rtl is None else min(n_rtl, len(images))
+    preds = [int(np.argmax(r[1])) for r in results[:n]]
+    write_hex_mem(os.path.join(outdir, "model_mem.hex"), _MEM_CACHE["mem"])
+    iw = len(image_words(images[0]))
+    with open(os.path.join(outdir, "images.hex"), "w") as f:
+        for i in range(n):
+            for w in image_words(images[i]):
+                f.write(f"{w:08x}\n")
+    ncls = layers[-1]["cout"]
+    with open(os.path.join(outdir, "expected.hex"), "w") as f:
+        for i in range(n):
+            for v in results[i][1]:
+                f.write(f"{int(v) & 0xFF:08x}\n")
+            f.write(f"{int(labels[i]):08x}\n{preds[i]:08x}\n")
+    per_img = 0
+    with open(os.path.join(outdir, "expmaps.hex"), "w") as f:
+        for i in range(n):
+            per_img = 0
+            for mp in results[i][0]:
+                for v in mp.reshape(-1):
+                    f.write(f"{int(v) & 0xFF:02x}\n")
+                    per_img += 1
+    c, h, w = images[0].shape
+    with open(os.path.join(outdir, "model_params.vh"), "w") as f:
+        f.write("// written by the Python flow (compile.write_files)\n")
+        f.write(f"localparam NIMG = {n};\nlocalparam IMG_WORDS = {iw};\n")
+        f.write(f"localparam IMG_C = {c};\nlocalparam IMG_H = {h};\nlocalparam IMG_W = {w};\n")
+        f.write(f"localparam NL = {len(entries)};\nlocalparam NCLASS = {ncls};\nlocalparam MAP_BYTES = {per_img};\n")
+        f.write(f"localparam SOFTMAX = {1 if layers[-1]['softmax'] else 0};\n")
+        f.write(f"localparam FLOAT_ACC_X10000 = {int(round(float_acc * 10000))};\n")
+        f.write(f"localparam INT_ACC_X10000 = {int(round(int_acc * 10000))};\n")
+        for name, idx in (("lay_c", 2), ("lay_h", 0), ("lay_w", 1), ("lay_mode", 3)):
+            f.write(f"function integer {name}(input integer l);\n\tcase (l)\n")
+            for li, e in enumerate(entries):
+                v = e["mode"] if idx == 3 else e["out"][idx]
+                f.write(f"\t\t{li}: {name} = {v};\n")
+            f.write(f"\t\tdefault: {name} = 0;\n\tendcase\nendfunction\n")
+    return n
+
+
+_MEM_CACHE = {}
+
+
+def build(layers, q, table, in_c, in_h, in_w):
+    mem, entries = compile_network(layers, q, table, in_c, in_h, in_w)
+    _MEM_CACHE["mem"] = mem
+    return mem, entries
+
+
+def report_and_write(layers, params, xtr, xte, yte, outdir, float_logits, in_scale=127.0, n_rtl=None):
+    float_pred = float_logits.argmax(axis=1)
+    float_acc = (float_pred == yte).mean()
+
+    print("\n2) Quantization (calibration on training images):")
+    q, table = chipnet.quantize(layers, params, xtr, s_in=1.0 / in_scale)
+    for li, (L, ql) in enumerate(zip(layers, q)):
+        print(f"   layer {li} ({L['kind']} {L['cin']}->{L['cout']}, {L['kh']}x{L['kw']}, stride {L['stride']}, "
+              f"pad {L['pad']}{', ReLU' if L['relu'] else ''}{', 2x2 pool' if L['pool'] else ''}"
+              f"{', softmax' if L['softmax'] else ''}): requantization "
+              f"{ql['s_in'] * ql['s_w'] / ql['s_out']:.6f} ~ M {ql['M']} / 2^{ql['S']}")
+    if layers[-1]["softmax"]:
+        print(f"   exp table: one logit step = {q[-1]['s_out']:.4f}")
+
+    print(f"\n3) The integer model (bit-exact with the chip) on {len(xte)} test images:")
+    xq = chipnet.input_int8(xte, in_scale)
+    results = [chipnet.golden(layers, q, table, xq[i]) for i in range(len(xq))]
+    int_pred = np.array([int(np.argmax(r[1])) for r in results])
+    int_acc = (int_pred == yte).mean()
+    print(f"   float accuracy {float_acc * 100:.2f}%,  integer (chip) accuracy {int_acc * 100:.2f}%,  "
+          f"same prediction as float on {(int_pred == float_pred).mean() * 100:.1f}% of the images")
+
+    print("\n4) Compiling for the chip:")
+    mem, entries = build(layers, q, table, xq.shape[1], xq.shape[2], xq.shape[3])
+    for li, e in enumerate(entries):
+        print(f"   layer {li}: table entry at {e['addr']} ({e['words']} words, program {e['prog']} instructions), "
+              f"weights at {e['wgt']} ({e['wgt_words']} words), input {e['in_hw'][0]}x{e['in_hw'][1]} -> "
+              f"stored {e['out'][0]}x{e['out'][1]}x{e['out'][2]}")
+    n = write_files(outdir, layers, entries, xq, yte, results, float_acc, int_acc, n_rtl)
+    print(f"   wrote {len(mem)} words of weights and table, and {n} test images for the RTL, to {outdir}")
+    return float_acc, int_acc
