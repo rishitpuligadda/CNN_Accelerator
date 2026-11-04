@@ -17,18 +17,7 @@ module accel_top #(
     output                    err_valid,
     output     [6:0]          err,
 
-    input      [EAW-1:0]      img_ext_base,
-    input      [EAW-1:0]      wgt_ext_base,
-    input      [7:0]          in_h,
-    input      [7:0]          in_w,
-    input      [7:0]          in_c,
-    input      [7:0]          n_filt,
-    input      [2:0]          k_h,
-    input      [2:0]          k_w,
-    input      [2:0]          pad,
-    input      [2:0]          stride,
-    input      [1:0]          pool,
-    input      [ADDR-1:0]     out_base,
+    input      [EAW-1:0]      tbl_base,
 
     output                    rd_req_valid,
     input                     rd_req_ready,
@@ -37,17 +26,35 @@ module accel_top #(
     input      [31:0]         rd_resp_data,
     output                    rd_resp_ready,
 
-    input                     vcfg_we,
-    input      [9:0]          vcfg_addr,
-    input      [31:0]         vcfg_data,
-
-    input                     ob_rd_en,
-    input      [ADDR-1:0]     ob_rd_addr,
-    output     [31:0]         ob_rd_data
+    output                    wr_req_valid,
+    input                     wr_req_ready,
+    output     [EAW-1:0]      wr_req_addr,
+    output     [31:0]         wr_req_data
 );
 	wire                    rst_s;
 
-	wire                    cfg_busy, cfg_go;
+	// layer sequencer: reads the layer table, configures and starts each layer
+	wire                    seq_busy, seq_done, seq_mem, seq_layer_start, sel;
+	wire                    seq_rd_valid, seq_rd_ready_out;
+	wire [EAW-1:0]          seq_rd_addr;
+	wire                    vcfg_we;
+	wire [9:0]              vcfg_addr;
+	wire [31:0]             vcfg_data;
+	wire [7:0]              in_h, in_w, in_c, n_filt, unused_layer_idx;
+	wire [2:0]              k_h, k_w, pad, stride;
+	wire [1:0]              pool;
+	wire                    load_img;
+	wire [EAW-1:0]          img_ext_base, wgt_ext_base;
+	wire [ADDR-1:0]         out_base;
+	wire                    wb_start, wb_done, unused_wb_busy, wb_en;
+	wire [ADDR-1:0]         wb_src, wb_addr;
+	wire [ADDR:0]           wb_words;
+	wire [EAW-1:0]          wb_ext_base;
+	wire [31:0]             wb_rdata;
+	wire                    dma_rd_valid, dma_rd_resp_ready;
+	wire [EAW-1:0]          dma_rd_addr;
+
+	wire                    unused_cfg_busy, cfg_go;
 	wire [EAW-1:0]          c_img_ext_base, c_wgt_ext_base;
 	wire [ADDR:0]           c_img_words;
 	wire [10:0]             c_m;
@@ -120,19 +127,43 @@ module accel_top #(
 	wire [31:0]             unused_wgt_rdata0;
 	wire                    unused_dma_busy;
 
-	assign busy = cfg_busy || ctrl_busy || vu_busy;
-	assign done = vu_done || err_valid;
+	assign busy = seq_busy;
+	assign done = seq_done;
+
+	layer_seq #(.EAW(EAW), .ADDR(ADDR)) u_seq (
+		.clk(clk), .rst_n(rst_s), .start(start), .tbl_base(tbl_base), .busy(seq_busy), .done(seq_done),
+		.mem_own(seq_mem), .rd_req_valid(seq_rd_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(seq_rd_addr),
+		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(seq_rd_ready_out),
+		.vcfg_we(vcfg_we), .vcfg_addr(vcfg_addr), .vcfg_data(vcfg_data),
+		.in_h(in_h), .in_w(in_w), .in_c(in_c), .n_filt(n_filt), .k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride),
+		.pool(pool), .load_img(load_img), .wgt_ext_base(wgt_ext_base), .img_ext_base(img_ext_base),
+		.out_base(out_base), .layer_start(seq_layer_start), .layer_done(vu_done), .layer_err(err_valid),
+		.wb_start(wb_start), .wb_src(wb_src), .wb_words(wb_words), .wb_ext_base(wb_ext_base), .wb_done(wb_done),
+		.sel(sel), .layer_idx(unused_layer_idx)
+	);
+
+	// external memory: the sequencer reads the table between layers, the DMA reads images and weights
+	assign rd_req_valid  = seq_mem ? seq_rd_valid     : dma_rd_valid;
+	assign rd_req_addr   = seq_mem ? seq_rd_addr      : dma_rd_addr;
+	assign rd_resp_ready = seq_mem ? seq_rd_ready_out : dma_rd_resp_ready;
+
+	writeback #(.EAW(EAW), .ADDR(ADDR)) u_wb (
+		.clk(clk), .rst_n(rst_s), .start(wb_start), .src(wb_src), .nwords(wb_words), .ext_base(wb_ext_base),
+		.done(wb_done), .busy(unused_wb_busy),
+		.buf_en(wb_en), .buf_addr(wb_addr), .buf_rdata(wb_rdata),
+		.wr_req_valid(wr_req_valid), .wr_req_ready(wr_req_ready), .wr_req_addr(wr_req_addr), .wr_req_data(wr_req_data)
+	);
 
 	reset_sync u_rst (
 		.rst_sync(rst_s), .rst_async(rst_n), .clk(clk)
 	);
 
 	layer_config #(.EAW(EAW), .ADDR(ADDR), .DEPTH_F(1536), .DEPTH_W(1024)) u_cfg (
-		.clk(clk), .rst_n(rst_s), .start(start), .ctrl_busy(ctrl_busy || vu_busy),
+		.clk(clk), .rst_n(rst_s), .start(seq_layer_start), .ctrl_busy(ctrl_busy || vu_busy),
 		.img_ext_base(img_ext_base), .wgt_ext_base(wgt_ext_base),
 		.in_h(in_h), .in_w(in_w), .in_c(in_c), .n_filt(n_filt),
 		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .pool(pool), .out_base(out_base),
-		.busy(cfg_busy), .go(cfg_go), .bad(err_valid), .err(err),
+		.busy(unused_cfg_busy), .go(cfg_go), .bad(err_valid), .err(err),
 		.l_img_ext_base(c_img_ext_base), .l_wgt_ext_base(c_wgt_ext_base), .l_img_words(c_img_words),
 		.l_m(c_m), .l_n_groups(c_n_groups), .l_last_cols(c_last_cols),
 		.l_in_h(c_in_h), .l_in_w(c_in_w), .l_kh_max(c_kh_max), .l_kw_max(c_kw_max), .l_c_max(c_c_max),
@@ -142,7 +173,7 @@ module accel_top #(
 	);
 
 	layer_controller #(.EAW(EAW), .ADDR(ADDR), .N(N), .CREDITS(PKT_Q)) u_ctrl (
-		.clk(clk), .rst_n(rst_s), .go(cfg_go), .busy(ctrl_busy), .done(ctrl_done), .img_phase(img_phase),
+		.clk(clk), .rst_n(rst_s), .go(cfg_go), .busy(ctrl_busy), .done(ctrl_done), .img_phase(img_phase), .load_img(load_img),
 		.img_ext_base(c_img_ext_base), .img_words(c_img_words), .wgt_ext_base(c_wgt_ext_base),
 		.m(c_m), .n_groups(c_n_groups), .last_cols(c_last_cols),
 		.out_h(c_out_h), .out_w(c_out_w), .pad(c_pad), .stride(c_stride),
@@ -162,19 +193,32 @@ module accel_top #(
 		.clk(clk), .rst_n(rst_s),
 		.start(dma_start), .ext_base(dma_ext_base), .sram_base(dma_sram_base), .nwords(dma_nwords),
 		.busy(unused_dma_busy), .done(dma_done),
-		.rd_req_valid(rd_req_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(rd_req_addr),
-		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(rd_resp_ready),
+		.rd_req_valid(dma_rd_valid), .rd_req_ready(rd_req_ready && !seq_mem), .rd_req_addr(dma_rd_addr),
+		.rd_resp_valid(rd_resp_valid && !seq_mem), .rd_resp_data(rd_resp_data), .rd_resp_ready(dma_rd_resp_ready),
 		.wr_en(dma_wr_en), .wr_addr(dma_wr_addr), .wr_data(dma_wr_data)
 	);
+
+	// ---------------------------------------------------------------- feature buffers A and B, ping-pong
+	// sel = 0: A is the layer's input (DMA image load, act_feeder reads), B its output (vector unit writes,
+	// write-back reads); sel = 1: the other way round. The sequencer flips sel after every layer.
+	wire        in_en0  = img_phase ? dma_wr_en : act_mem_en;
+	wire        in_we0  = img_phase && dma_wr_en;
+	wire [ADDR-1:0] in_a0 = img_phase ? dma_wr_addr : act_addr0;
+	wire [31:0] fa_rdata0, fa_rdata1, fb_rdata0, fb_rdata1;
+
+	assign act_rdata0 = sel ? fb_rdata0 : fa_rdata0;
+	assign act_rdata1 = sel ? fb_rdata1 : fa_rdata1;
+	assign wb_rdata   = sel ? fa_rdata1 : fb_rdata1;
+	assign unused_ob_rdata0 = sel ? fa_rdata0 : fb_rdata0;
 
 	ram_1rw1r #(.DEPTH(1536)) u_feat (
 `ifdef USE_POWER_PINS
 		.vccd1(vccd1), .vssd1(vssd1),
 `endif
 		.clk(clk),
-		.en0(img_phase ? dma_wr_en : act_mem_en), .we0(img_phase && dma_wr_en), .be0(4'hF),
-		.addr0(img_phase ? dma_wr_addr : act_addr0), .wdata0(dma_wr_data), .rdata0(act_rdata0),
-		.en1(act_mem_en), .addr1(act_addr1), .rdata1(act_rdata1)
+		.en0(sel ? st_en : in_en0), .we0(sel ? st_en : in_we0), .be0(sel ? st_be : 4'hF),
+		.addr0(sel ? st_addr : in_a0), .wdata0(sel ? st_data : dma_wr_data), .rdata0(fa_rdata0),
+		.en1(sel ? wb_en : act_mem_en), .addr1(sel ? wb_addr : act_addr1), .rdata1(fa_rdata1)
 	);
 
 	ram_1rw1r #(.DEPTH(1024)) u_wgt (
@@ -286,15 +330,14 @@ module accel_top #(
 		.st_en(st_en), .st_addr(st_addr), .st_be(st_be), .st_data(st_data)
 	);
 
-	// ---------------------------------------------------------------- feature buffer B: the vector unit's output
 	ram_1rw1r #(.DEPTH(1536)) u_featb (
 `ifdef USE_POWER_PINS
 		.vccd1(vccd1), .vssd1(vssd1),
 `endif
 		.clk(clk),
-		.en0(st_en), .we0(st_en), .be0(st_be),
-		.addr0(st_addr), .wdata0(st_data), .rdata0(unused_ob_rdata0),
-		.en1(ob_rd_en), .addr1(ob_rd_addr), .rdata1(ob_rd_data)
+		.en0(sel ? in_en0 : st_en), .we0(sel ? in_we0 : st_en), .be0(sel ? 4'hF : st_be),
+		.addr0(sel ? in_a0 : st_addr), .wdata0(sel ? dma_wr_data : st_data), .rdata0(fb_rdata0),
+		.en1(sel ? act_mem_en : wb_en), .addr1(sel ? act_addr1 : wb_addr), .rdata1(fb_rdata1)
 	);
 
 `ifndef SYNTHESIS

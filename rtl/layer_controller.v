@@ -10,6 +10,7 @@ module layer_controller #(
     output reg                     busy,
     output reg                     done,
     output reg                     img_phase,
+    input                          load_img,
 
     input      [EAW-1:0]           img_ext_base,
     input      [ADDR:0]            img_words,
@@ -172,7 +173,7 @@ module layer_controller #(
 				S_IDLE: begin
 					if (go) begin
 						busy         <= 1'b1;
-						img_phase    <= 1'b1;
+						img_phase    <= load_img;
 						g            <= 7'd0;
 						half         <= 1'b0;
 						dbuf         <= (m + 11'd4 <= 11'd512);
@@ -181,7 +182,7 @@ module layer_controller #(
 						o_grp_base   <= out_base;
 						tiles_issued <= 16'd0;
 						tiles_done   <= 16'd0;
-						state        <= S_IMG;
+						state        <= load_img ? S_IMG : S_WLOAD;   // later layers find their input in the buffer
 					end
 				end
 
