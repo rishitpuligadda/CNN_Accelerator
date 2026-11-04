@@ -1,5 +1,5 @@
 // written by the Python flow (compile.write_files)
-localparam NIMG = 10;
+localparam NIMG = 1000;
 localparam IMG_WORDS = 197;
 localparam IMG_C = 1;
 localparam IMG_H = 28;
@@ -8,8 +8,8 @@ localparam NL = 5;
 localparam NCLASS = 10;
 localparam MAP_BYTES = 6306;
 localparam SOFTMAX = 1;
-localparam FLOAT_ACC_X10000 = 9899;
-localparam INT_ACC_X10000 = 9900;
+localparam FLOAT_ACC_X10000 = 9005;
+localparam INT_ACC_X10000 = 9003;
 function integer lay_c(input integer l);
 	case (l)
 		0: lay_c = 24;
