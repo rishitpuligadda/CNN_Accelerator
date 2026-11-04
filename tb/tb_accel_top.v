@@ -7,6 +7,8 @@ module tb_accel_top;
 	localparam EWORDS = 1 << EAW;
 	localparam IMG_EB = 0;
 	localparam WGT_EB = 16384;
+	localparam TBL_EB = 49152;            // layer table
+	localparam WB_EB  = 57344;            // the chip writes its result here
 	localparam QMAX   = 65536;
 	localparam SQ     = 32;
 	localparam KQ     = 49;
@@ -34,13 +36,13 @@ module tb_accel_top;
 	wire [7:0]              pkt_col   = dut.pkt_col;
 	wire [7:0]              pkt_chan  = dut.pkt_chan;
 
-	reg                     vcfg_we;
-	reg  [9:0]              vcfg_addr;
-	reg  [31:0]             vcfg_data;
-	reg                     ob_rd_en;
-	reg  [ADDR-1:0]         ob_rd_addr;
-	wire [31:0]             ob_rd_data;
 	reg  [1:0]              pool;
+	reg  [EAW-1:0]          tbl_base;
+	wire                    wr_req_valid, wr_req_ready;
+	wire [EAW-1:0]          wr_req_addr;
+	wire [31:0]             wr_req_data;
+	reg                     wr_rdy_r;
+	integer                 wb_count;
 
 	reg  [31:0]             ext_mem [0:EWORDS-1];
 	integer                 img  [0:16*SQ*SQ-1];
@@ -72,18 +74,32 @@ module tb_accel_top;
 
 	accel_top #(.EAW(EAW), .N(N), .ADDR(ADDR)) dut (
 		.clk(clk), .rst_n(rst_n), .start(start), .busy(busy), .done(done), .err_valid(err_valid), .err(err),
-		.img_ext_base(img_ext_base), .wgt_ext_base(wgt_ext_base),
-		.in_h(in_h), .in_w(in_w), .in_c(in_c), .n_filt(n_filt),
-		.k_h(k_h), .k_w(k_w), .pad(pad), .stride(stride), .pool(pool), .out_base(out_base),
+		.tbl_base(tbl_base),
 		.rd_req_valid(rd_req_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(rd_req_addr),
 		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(rd_resp_ready),
-		.vcfg_we(vcfg_we), .vcfg_addr(vcfg_addr), .vcfg_data(vcfg_data),
-		.ob_rd_en(ob_rd_en), .ob_rd_addr(ob_rd_addr), .ob_rd_data(ob_rd_data)
+		.wr_req_valid(wr_req_valid), .wr_req_ready(wr_req_ready), .wr_req_addr(wr_req_addr), .wr_req_data(wr_req_data)
 	);
 
 	initial begin
 		clk = 1'b0;
 		forever #5 clk = ~clk;
+	end
+
+	// write channel: accepted with the same randomness as reads; the data lands in ext_mem
+	assign wr_req_ready = mem_on && wr_rdy_r;
+	// the ready signal changes with a non-blocking assignment, so the chip and this model both see the
+	// value from before the clock edge (a blocking update here would race with the chip's sampling)
+	always @(posedge clk) wr_rdy_r <= ({$random} % 100) < rdy_pct;
+
+	initial begin
+		wb_count = 0;
+		forever begin
+			@(posedge clk);
+			if (wr_req_valid && wr_req_ready) begin
+				ext_mem[wr_req_addr] = wr_req_data;
+				wb_count = wb_count + 1;
+			end
+		end
 	end
 
 	assign rd_req_ready  = mem_on && rdy_r && (sq_count < 32);
@@ -385,12 +401,29 @@ module tb_accel_top;
 			np_v = np_v + 1;
 		end
 	endtask
-	task vcfg(input [9:0] a, input [31:0] d);
+	// one-layer network: the layer's table entry (header, sections, program, lookup table) at TBL_EB
+	integer   sec_s [0:5];
+	integer   sec_l [0:5];
+	integer   sec_c [0:5];
+	integer   n_lut_e;
+	integer   wb_n;
+
+	task write_entry(input integer n_prog, input integer wbn);
+		integer i, a;
 		begin
-			@(negedge clk);
-			vcfg_we = 1'b1; vcfg_addr = a; vcfg_data = d;
-			@(negedge clk);
-			vcfg_we = 1'b0;
+			a = TBL_EB;
+			ext_mem[a + 0] = {n_filt, in_c, in_w, in_h};
+			ext_mem[a + 1] = {13'd0, 1'b1, 1'b1, 1'b1, 2'd0, pool, stride, pad, k_w, k_h};   // last, write back, load image
+			ext_mem[a + 2] = {5'd0, out_base, wgt_ext_base};
+			ext_mem[a + 3] = {16'(WB_EB), img_ext_base};
+			ext_mem[a + 4] = {8'd0, 12'(wbn), 1'b0, 11'd0};                                 // count [23:12], source 0 [10:0]
+			ext_mem[a + 5] = {15'd0, 9'(n_lut_e), 1'b0, 7'(n_prog)};
+			for (i = 0; i < 6; i = i + 1) ext_mem[a + 6 + i] = {10'd0, 9'(sec_c[i]), 7'(sec_l[i]), 6'(sec_s[i])};
+			for (i = 0; i < n_prog; i = i + 1) ext_mem[a + 12 + i] = prg_v[i];
+			for (i = 0; i < (n_lut_e + 1) / 2; i = i + 1) ext_mem[a + 12 + n_prog + i] = {exp_tab[2 * i + 1], exp_tab[2 * i]};
+			for (i = 0; i < 1600; i = i + 1) ext_mem[WB_EB + i] = 32'hDEADBEEF;               // so missing writes show
+			wb_n = wbn;
+			tbl_base = TBL_EB;
 		end
 	endtask
 
@@ -496,19 +529,16 @@ module tb_accel_top;
 				vemit(venc(6'h04, 3'd0, 4'd5, 4'd10, 4'd1, 11'd0));   // ADDS s5, s10, s1
 				vemit(venc(6'h39, 3'd0, 4'd11, 4'd2, 4'd5, 11'd1));   // ST8A v2, s5, s11, c1
 				s_e3_s = np_v;
-				for (i = 0; i < 256; i = i + 1) vcfg(10'h100 + i[9:0], {16'd0, exp_tab[i]});
 			end
-			for (i = 0; i < np_v; i = i + 1) vcfg(i[9:0], prg_v[i]);
-			vcfg(10'h040, 0);        vcfg(10'h041, s_pro_l);  vcfg(10'h042, 1);
-			vcfg(10'h043, s_body_s); vcfg(10'h044, s_body_l);
+			for (i = 0; i < 6; i = i + 1) begin sec_s[i] = 0; sec_l[i] = 0; sec_c[i] = 0; end
+			sec_s[0] = 0;        sec_l[0] = s_pro_l;  sec_c[0] = 1;
+			sec_s[1] = s_body_s; sec_l[1] = s_body_l;
+			n_lut_e = 0;
 			if (vu_mode == 4) begin
-				vcfg(10'h045, s_e0_s); vcfg(10'h046, s_e1_s - s_e0_s); vcfg(10'h047, L_F);
-				vcfg(10'h048, s_e1_s); vcfg(10'h049, s_e2_s - s_e1_s); vcfg(10'h04A, 1);
-				vcfg(10'h04B, s_e2_s); vcfg(10'h04C, s_e3_s - s_e2_s); vcfg(10'h04D, L_F);
-				vcfg(10'h04F, 0);
-			end
-			else begin
-				vcfg(10'h046, 0);    vcfg(10'h049, 0);        vcfg(10'h04C, 0);  vcfg(10'h04F, 0);
+				sec_s[2] = s_e0_s; sec_l[2] = s_e1_s - s_e0_s; sec_c[2] = L_F;
+				sec_s[3] = s_e1_s; sec_l[3] = s_e2_s - s_e1_s; sec_c[3] = 1;
+				sec_s[4] = s_e2_s; sec_l[4] = s_e3_s - s_e2_s; sec_c[4] = L_F;
+				n_lut_e  = 256;
 			end
 		end
 	endtask
@@ -526,19 +556,9 @@ module tb_accel_top;
 		end
 	endfunction
 
-	// buffer B read: the address is taken at a rising edge, and the data is sampled at the next rising edge.
-	// (The sky130 macro model drives its data 3 ns after the falling edge and blanks it 1 ns after the next
-	// rising edge, so the rising edge is the only safe point - the same point the feeders' output register uses.)
+	// the result as written back by the chip into external memory (word a of the output buffer -> WB_EB + a)
 	task ob_read(input [ADDR-1:0] a, output [31:0] d);
-		begin
-			@(negedge clk);
-			ob_rd_en = 1'b1; ob_rd_addr = a;
-			@(posedge clk);
-			@(negedge clk);
-			ob_rd_en = 1'b0;
-			@(posedge clk);
-			d = ob_rd_data;
-		end
+		d = ext_mem[WB_EB + {21'd0, a}];
 	endtask
 
 	// softmax over the classes (1x1xC output): bit-exact reference of the program, plus float softmax
@@ -668,7 +688,7 @@ module tb_accel_top;
 
 	task run(input integer h, input integer w, input integer ch, input integer nf,
 	         input integer kh_, input integer kw_, input integer p, input integer s, input integer loud);
-		integer t0, p0, e0, f, y, x, missing, tiles, ideal;
+		integer t0, p0, e0, f, y, x, missing, tiles, ideal, wbw, wb0;
 		begin
 			layer(h, w, ch, nf, kh_, kw_, p, s);
 			if (force_mode >= 0)                vu_mode = force_mode;
@@ -677,6 +697,11 @@ module tb_accel_top;
 			choose_scale;
 			load_vu;
 			pool = (vu_mode == 2) ? 2'd1 : 2'd0;
+			if (vu_mode == 4)      wbw = 1 + L_F;
+			else if (vu_mode == 2) wbw = 1 + L_F * (L_OH / 2) * (((L_OW / 2) + 3) / 4);
+			else                   wbw = 1 + L_F * L_OCH;
+			write_entry(np_v, wbw);
+			wb0 = wb_count;
 			p0 = pkts;
 			e0 = errors + mon_err;
 			if (loud != 0) begin
@@ -703,10 +728,14 @@ module tb_accel_top;
 				$display("FAIL: busy still high after done");
 			end
 			if (loud != 0)
-				$display("    vector unit: %0s, M = %0d, S = %0d; int8 result in buffer B (filter 0, top-left corner):",
+				$display("    vector unit: %0s, M = %0d, S = %0d; int8 result written back (filter 0, top-left corner):",
 				         (vu_mode == 0) ? "requantize" : ((vu_mode == 1) ? "requantize + ReLU" :
 				         ((vu_mode == 2) ? "requantize + ReLU + 2x2 max pooling" :
 				         ((vu_mode == 4) ? "requantize, then softmax over the classes" : "requantize, 40-instruction body"))), q_m, q_s);
+			if (wb_count - wb0 != wbw || wb_n != wbw) begin
+				errors = errors + 1;
+				$display("FAIL: %0d words written back, expected %0d", wb_count - wb0, wbw);
+			end
 			check_obuf(loud);
 
 			missing = 0;
@@ -758,6 +787,10 @@ module tb_accel_top;
 		begin
 			in_h = h; in_w = w; in_c = ch; n_filt = nf;
 			k_h = kh_; k_w = kw_; pad = p; stride = s; out_base = obase; pool = 2'd0;
+			img_ext_base = IMG_EB; wgt_ext_base = WGT_EB;
+			for (t0 = 0; t0 < 6; t0 = t0 + 1) begin sec_s[t0] = 0; sec_l[t0] = 0; sec_c[t0] = 0; end
+			n_lut_e = 0;
+			write_entry(0, 0);
 			p0 = pkts;
 			t0 = cyc;
 			pulse_start;
@@ -784,7 +817,8 @@ module tb_accel_top;
 		end
 
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
-		vcfg_we = 1'b0; vcfg_addr = 10'd0; vcfg_data = 32'd0; ob_rd_en = 1'b0; ob_rd_addr = {ADDR{1'b0}}; pool = 2'd0;
+		pool = 2'd0; tbl_base = TBL_EB; wr_rdy_r = 1'b1; n_lut_e = 0; wb_n = 0;
+		for (n = 0; n < 6; n = n + 1) begin sec_s[n] = 0; sec_l[n] = 0; sec_c[n] = 0; end
 		for (n = 0; n < 256; n = n + 1)
 			exp_tab[n] = 16'($rtoi(32767.0 * $exp(((n < 128) ? 0 : n - 256) * SM_STEP) + 0.5));
 		s_e0_s = 0; s_e1_s = 0; s_e2_s = 0; s_e3_s = 0;
@@ -925,11 +959,11 @@ module tb_accel_top;
 			$display("FAIL: %0d expected packets never arrived", q_tail - q_head);
 		end
 		errors = errors + mon_err + obuf_err;
-		$display("   %0d int8 values read back from buffer B, %0d wrong", obuf_checked, obuf_err);
+		$display("   %0d int8 values written back to external memory and checked, %0d wrong", obuf_checked, obuf_err);
 		$display("");
 
 		if (errors != 0) $fatal(1, "FAIL: %0d error(s)", errors);
-		$display("PASS: %0d layers, every accumulator and every int8 result in buffer B matches the reference; all invalid configurations rejected", layers);
+		$display("PASS: %0d layers, every accumulator and every int8 result written back to external memory matches the reference; all invalid configurations rejected", layers);
 		$finish;
 	end
 endmodule

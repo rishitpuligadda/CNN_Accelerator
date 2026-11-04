@@ -10,7 +10,7 @@ rm -rf obj_dir
 mkdir -p waveforms outputs
 
 verilator --binary -j 0 -Wall \
-	../rtl/accel_top.v ../rtl/pkt_fifo.v ../rtl/layer_config.v ../rtl/layer_controller.v ../rtl/dma.v ../rtl/ram_1rw1r.v \
+	../rtl/accel_top.v ../rtl/layer_seq.v ../rtl/writeback.v ../rtl/pkt_fifo.v ../rtl/layer_config.v ../rtl/layer_controller.v ../rtl/dma.v ../rtl/ram_1rw1r.v \
 	../rtl/act_feeder.v ../rtl/wgt_feeder.v ../rtl/skew_buffer.v ../rtl/systolic_array.v \
 	../rtl/Processing_Element.v ../rtl/reset_sync.v ../rtl/result_collector.v ../rtl/vector_unit.v ../rtl/vu_regs.v ../rtl/vu_lane.v \
 	../tb/tb_accel_top.v $EXTRA \
