@@ -3,7 +3,8 @@
     python3 keras_export.py mnist_cnn.keras mnist.npz mnist_cnn_export.npz
 
 It writes a plain .npz (no TensorFlow needed afterwards) with every layer's type, settings and weights,
-and Keras's own predictions for the first 500 test images, so keras_flow.py can verify its conversion.
+and Keras's own predictions for the first 500 test images (with those images), so keras_flow.py can verify
+its conversion whatever images it runs later.
 """
 import json
 import sys
@@ -34,6 +35,7 @@ def main(model_path, mnist_path, out_path):
     x = x_test.reshape((-1,) + tuple(model.input_shape[1:])).astype(np.float32) / 255.0
     preds = model.predict(x, verbose=0)
     arrays["keras_preds"] = preds
+    arrays["keras_x"] = x_test          # the raw images Keras predicted on, for the flow's conversion check
     arrays["meta"] = np.array(json.dumps({"layers": meta, "input_shape": list(model.input_shape[1:]),
                                           "input_scale": 255.0}))
     np.savez(out_path, **arrays)

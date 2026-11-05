@@ -1,4 +1,0 @@
-images 360
-img_words 17
-float_accuracy 0.9833
-integer_accuracy 0.9833

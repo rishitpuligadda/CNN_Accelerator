@@ -166,46 +166,35 @@ def write_hex_mem(path, mem):
 
 
 def write_files(outdir, layers, entries, images, labels, results, float_acc, int_acc, n_rtl=None):
-    """Everything tb_model.v needs. images: int8 (N, C, H, W); results: golden() per image."""
+    """Files for the RTL run and for check_results.py.
+    For the testbench (tb_model.v) - only what the chip and its memory need, no expected values:
+      model_mem.hex (weights + layer table), images.hex, model_params.vh (counts and sizes)
+    For check_results.py only (the testbench never reads it):
+      golden.npz - the golden model's every layer map and output, labels, images, layer shapes"""
     import os
     os.makedirs(outdir, exist_ok=True)
     n = len(images) if n_rtl is None else min(n_rtl, len(images))
-    preds = [int(np.argmax(r[1])) for r in results[:n]]
     write_hex_mem(os.path.join(outdir, "model_mem.hex"), _MEM_CACHE["mem"])
     iw = len(image_words(images[0]))
     with open(os.path.join(outdir, "images.hex"), "w") as f:
         for i in range(n):
             for w in image_words(images[i]):
                 f.write(f"{w:08x}\n")
-    ncls = layers[-1]["cout"]
-    with open(os.path.join(outdir, "expected.hex"), "w") as f:
-        for i in range(n):
-            for v in results[i][1]:
-                f.write(f"{int(v) & 0xFF:08x}\n")
-            f.write(f"{int(labels[i]):08x}\n{preds[i]:08x}\n")
-    per_img = 0
-    with open(os.path.join(outdir, "expmaps.hex"), "w") as f:
-        for i in range(n):
-            per_img = 0
-            for mp in results[i][0]:
-                for v in mp.reshape(-1):
-                    f.write(f"{int(v) & 0xFF:02x}\n")
-                    per_img += 1
-    c, h, w = images[0].shape
+    words = [chipnet.map_words(e["out"][2], e["out"][0], e["out"][1]) for e in entries]
     with open(os.path.join(outdir, "model_params.vh"), "w") as f:
-        f.write("// written by the Python flow (compile.write_files)\n")
-        f.write(f"localparam NIMG = {n};\nlocalparam IMG_WORDS = {iw};\n")
-        f.write(f"localparam IMG_C = {c};\nlocalparam IMG_H = {h};\nlocalparam IMG_W = {w};\n")
-        f.write(f"localparam NL = {len(entries)};\nlocalparam NCLASS = {ncls};\nlocalparam MAP_BYTES = {per_img};\n")
-        f.write(f"localparam SOFTMAX = {1 if layers[-1]['softmax'] else 0};\n")
-        f.write(f"localparam FLOAT_ACC_X10000 = {int(round(float_acc * 10000))};\n")
-        f.write(f"localparam INT_ACC_X10000 = {int(round(int_acc * 10000))};\n")
-        for name, idx in (("lay_c", 2), ("lay_h", 0), ("lay_w", 1), ("lay_mode", 3)):
-            f.write(f"function integer {name}(input integer l);\n\tcase (l)\n")
-            for li, e in enumerate(entries):
-                v = e["mode"] if idx == 3 else e["out"][idx]
-                f.write(f"\t\t{li}: {name} = {v};\n")
-            f.write(f"\t\tdefault: {name} = 0;\n\tendcase\nendfunction\n")
+        f.write("// written by the Python flow (compile.write_files): sizes only, no expected values\n")
+        f.write(f"localparam NIMG = {n};\nlocalparam IMG_WORDS = {iw};\nlocalparam NL = {len(entries)};\n")
+        f.write(f"localparam WB_WORDS = {words[-1]};\n")
+        f.write("function integer lay_words(input integer l);\n\tcase (l)\n")
+        for li, w in enumerate(words):
+            f.write(f"\t\t{li}: lay_words = {w};\n")
+        f.write("\t\tdefault: lay_words = 0;\n\tendcase\nendfunction\n")
+    np.savez(os.path.join(outdir, "golden.npz"),
+             images=np.asarray(images[:n]), labels=np.asarray(labels[:n]),
+             outputs=np.array([r[1] for r in results[:n]]),
+             **{f"map{li}": np.array([r[0][li] for r in results[:n]]) for li in range(len(entries))},
+             shapes=np.array([e["out"] for e in entries]), modes=np.array([e["mode"] for e in entries]),
+             softmax=layers[-1]["softmax"], float_acc=float_acc, int_acc=int_acc)
     return n
 
 
@@ -220,7 +209,8 @@ def build(layers, q, table, in_c, in_h, in_w):
 
 def report_and_write(layers, params, xtr, xte, yte, outdir, float_logits, in_scale=127.0, n_rtl=None):
     float_pred = float_logits.argmax(axis=1)
-    float_acc = (float_pred == yte).mean()
+    known = yte >= 0                                     # -1 = no label (e.g. your own photos)
+    float_acc = (float_pred == yte)[known].mean() if known.any() else 0.0
 
     print("\n2) Quantization (calibration on training images):")
     q, table = chipnet.quantize(layers, params, xtr, s_in=1.0 / in_scale)
@@ -236,7 +226,7 @@ def report_and_write(layers, params, xtr, xte, yte, outdir, float_logits, in_sca
     xq = chipnet.input_int8(xte, in_scale)
     results = [chipnet.golden(layers, q, table, xq[i]) for i in range(len(xq))]
     int_pred = np.array([int(np.argmax(r[1])) for r in results])
-    int_acc = (int_pred == yte).mean()
+    int_acc = (int_pred == yte)[known].mean() if known.any() else 0.0
     print(f"   float accuracy {float_acc * 100:.2f}%,  integer (chip) accuracy {int_acc * 100:.2f}%,  "
           f"same prediction as float on {(int_pred == float_pred).mean() * 100:.1f}% of the images")
 

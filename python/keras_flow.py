@@ -195,22 +195,34 @@ def main(export_path, mnist_path, outdir="../simulation/model", n_rtl=100, n_cal
         h, w = sh, sw
 
     with np.load(mnist_path, allow_pickle=True) as f:
-        xtr, ytr, xte, yte = f["x_train"], f["y_train"], f["x_test"], f["y_test"]
+        xtr, ytr, xte, yte = f["x_train"], f["y_train"].ravel(), f["x_test"], f["y_test"].ravel()
     to_nchw = lambda a: a.reshape(len(a), in_h, in_w, in_c).transpose(0, 3, 1, 2).astype(np.float64) / in_div
     xtr_c, xte_c = to_nchw(xtr[:n_cal]), to_nchw(xte)
 
     print("\n   checking the conversion against Keras's own predictions:")
     kp = export["keras_preds"]
     m = len(kp)
-    ref = keras_reference(meta, export, xte[:m].reshape(m, in_h, in_w, in_c).astype(np.float64) / in_div)
-    ours, _ = chipnet.float_forward(layers, params, xte_c[:m])
-    ours_p = softmax(ours) if layers[-1]["softmax"] else ours
-    d_ref, d_ours = np.abs(ref - kp).max(), np.abs(ours_p - kp).max()
-    same = (ours_p.argmax(1) == kp.argmax(1)).mean()
-    print(f"   largest difference from Keras: reference {d_ref:.2e}, converted chip network {d_ours:.2e}; "
-          f"same class on {same * 100:.1f}% of {m} images")
-    if d_ours > 1e-3 or same < 1.0:
-        sys.exit("   the converted network does not reproduce Keras - please send me this output")
+    if "keras_x" in export.files:
+        kx = export["keras_x"]                          # the images Keras predicted on (saved by the exporter)
+    elif len(xte) >= m:
+        kx = xte[:m]                                    # older export: assume the same dataset's test images
+        print("   (older export without its images: using the first test images of the data file)")
+    else:
+        kx = None
+    if kx is None:
+        print("   skipped: this export has no images of its own and the data file has too few;")
+        print("   re-export with the current keras_export.py to enable the check")
+    else:
+        ref = keras_reference(meta, export, kx.reshape(m, in_h, in_w, in_c).astype(np.float64) / in_div)
+        ours, _ = chipnet.float_forward(layers, params, to_nchw(kx))
+        ours_p = softmax(ours) if layers[-1]["softmax"] else ours
+        d_ref, d_ours = np.abs(ref - kp).max(), np.abs(ours_p - kp).max()
+        same = (ours_p.argmax(1) == kp.argmax(1)).mean()
+        print(f"   largest difference from Keras: reference {d_ref:.2e}, converted chip network {d_ours:.2e}; "
+              f"same class on {same * 100:.1f}% of {m} images")
+        if d_ours > 1e-3 or same < 1.0:
+            sys.exit("   the converted network does not reproduce Keras (or the data file is a different dataset "
+                     "than the export) - please send me this output")
 
     logits, _ = chipnet.float_forward(layers, params, xte_c)
     report_and_write(layers, params, xtr_c, xte_c, yte, outdir, logits, in_scale=127.0, n_rtl=n_rtl)
