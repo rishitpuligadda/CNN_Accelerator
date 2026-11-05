@@ -1,8 +1,8 @@
-# CNN Accelerator for SkyWater sky130
+# CNN Accelerator
 
-**Shivani and Rishit**
+**by Shivani and Rishit**
 
-An int8 convolutional-neural-network accelerator written in Verilog, targeting the open SkyWater sky130 process.
+An int8 convolutional-neural-network accelerator chip, written in Verilog for an open-source 130 nm process.
 A trained Keras model is compiled into a table of layers in external memory; the chip runs the whole network
 from a single `start` - convolutions, fully connected layers, requantization, activations, pooling and softmax -
 and writes the result back to memory.
@@ -37,7 +37,7 @@ and writes the result back to memory.
 | Arithmetic | int8 activations and weights, 32-bit accumulation, int32 biases |
 | Compute | 4 x 4 output-stationary systolic array (16 multiply-accumulates per cycle) |
 | Post-processing | a programmable 4-lane SIMD vector unit: requantization, ReLU / Leaky ReLU / ReLU6, any activation by lookup table, max and average pooling, global average pooling, argmax, softmax |
-| On-chip memory | 16 KB in 8 sky130 SRAM macros: two 6 KB feature buffers (ping-pong) and a 4 KB weight buffer |
+| On-chip memory | 16 KB in 8 SRAM macros (two 6 KB feature buffers for ping-pong, and a 4 KB weight buffer), plus the vector unit's 4 KB local memory, 512-byte lookup table and 256-byte program memory (flip-flops for now) |
 | Off-chip | weights, layer table and input image in external memory; weights stream in filter group by filter group |
 | Control | a layer sequencer reads the network from a layer table - one `start` runs the whole model |
 | Interface | `start`, table address, `busy` / `done` / `err`, and a valid/ready memory read and write channel |
@@ -135,7 +135,8 @@ array's 32-bit accumulators into the int8 feature map of the next layer. Its ful
   predicates on their row, column, channel, address or byte mask.
 - **Across lanes:** `MAXP`/`ADDP` (pairs), `PERM`/`PERMS` (permutations), `RMAX`/`RADD` (reductions to a scalar).
 - **Address unit:** computes where a pooled value belongs (`paddr`, `pbe`, `lmidx`) from the packet's tags.
-- **Local memory:** 4 KB for values that span packets (pooling rows, per-channel sums, softmax logits).
+- **Local memory:** 4 KB (256 entries of 128 bits). It holds values that span packets: the even row's partial
+  maxima during 2 x 2 pooling, the logits during softmax, and per-channel sums for global average pooling.
 - **Lookup table** (256 x 16 bits) for any function of an int8 value - exp for softmax, sigmoid, tanh, ...
 - **`RCP`**, a reciprocal unit (2^n / x), for softmax's division.
 
