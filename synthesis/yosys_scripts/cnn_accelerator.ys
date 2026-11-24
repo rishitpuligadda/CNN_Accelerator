@@ -1,0 +1,11 @@
+read_verilog ../../rtl/sync_fifo.v
+hierarchy -check -top sync_fifo
+proc; opt; fsm; opt; memory; opt
+techmap; opt
+dfflibmap -liberty /foss/designs/sky130.lib
+abc -liberty /foss/designs/sky130.lib
+abc
+clean -purge
+stat
+show -format png -prefix ../schematic/sync_fifo -colors 1
+write_verilog -noattr ../netlist/synth_sync_fifo.v
