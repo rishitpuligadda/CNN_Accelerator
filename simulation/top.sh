@@ -1,5 +1,5 @@
 #!/bin/bash
-MACRO_V=../macros/sky130_sram_2kbyte_1rw1r_32x512_8.v
+MACRO_V="../macros/sky130_sram_2kbyte_1rw1r_32x512_8.v ../macros/sky130_sram_1kbyte_1rw1r_32x256_8.v"
 
 EXTRA=""
 if [ "$1" = "macro" ]; then
@@ -9,7 +9,7 @@ fi
 rm -rf obj_dir
 mkdir -p waveforms outputs
 
-verilator --binary -j 0 -Wall \
+verilator --binary --build-jobs 2 -Wall \
 	../rtl/accel_top.v ../rtl/layer_seq.v ../rtl/writeback.v ../rtl/pkt_fifo.v ../rtl/layer_config.v ../rtl/layer_controller.v ../rtl/dma.v ../rtl/ram_1rw1r.v \
 	../rtl/act_feeder.v ../rtl/wgt_feeder.v ../rtl/skew_buffer.v ../rtl/systolic_array.v \
 	../rtl/Processing_Element.v ../rtl/reset_sync.v ../rtl/result_collector.v ../rtl/vector_unit.v ../rtl/vu_regs.v ../rtl/vu_lane.v \

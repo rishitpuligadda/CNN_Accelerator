@@ -8,7 +8,7 @@ mkdir -p waveforms outputs
 [ -f model/model_params.vh ] || { echo "no compiled model in simulation/model/ - run py_run_model.sh or py_run_keras.sh first"; exit 1; }
 EXTRA=""
 if [ "$1" = "macro" ]; then
-	EXTRA="-DUSE_SRAM_MACRO -Wno-BLKSEQ ../macros/sky130_sram_2kbyte_1rw1r_32x512_8.v"
+	EXTRA="-DUSE_SRAM_MACRO -Wno-BLKSEQ ../macros/sky130_sram_2kbyte_1rw1r_32x512_8.v ../macros/sky130_sram_1kbyte_1rw1r_32x256_8.v"
 	shift
 fi
 TRACE=""

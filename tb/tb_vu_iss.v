@@ -5,6 +5,15 @@ module tb_vu_iss;
 	parameter NPKT  = 40;
 
 	localparam LANES = 4;
+
+	// the local memory as the hardware holds it: one array (behavioural) or 4 SRAM macros, one per lane
+	function [LANES*32-1:0] hw_lm(input [7:0] a);
+`ifdef USE_SRAM_MACRO
+		hw_lm = {dut.LM[3].u_mac.mem[a], dut.LM[2].u_mac.mem[a], dut.LM[1].u_mac.mem[a], dut.LM[0].u_mac.mem[a]};
+`else
+		hw_lm = dut.lmem[a];
+`endif
+	endfunction
 	localparam ADDR  = 11;
 	localparam W     = LANES * 32;
 	localparam QMAX  = 4096;
@@ -509,7 +518,7 @@ module tb_vu_iss;
 					if (state_err <= 10) $display("FAIL program %0d: requant/clamp set %0d differs", cur_prog, i);
 				end
 			for (i = 0; i < 256; i = i + 1)
-				if (dut.lmem[i] !== lm[i]) begin
+				if (hw_lm(i[7:0]) !== lm[i]) begin
 					state_err = state_err + 1;
 					if (state_err <= 10) $display("FAIL program %0d: local memory entry %0d differs", cur_prog, i);
 				end
@@ -603,7 +612,7 @@ module tb_vu_iss;
 			ipkt = dut.cur_data; iaddr = dut.cur_addr; ibe = dut.cur_be;
 			irow = dut.cur_row; icol = dut.cur_col; ichan = dut.cur_chan; ilast = dut.cur_last; imask = dut.mask;
 			ia_base = dut.ar_base; ia_chp = {16'd0, dut.ar_chp}; ia_rp = {16'd0, dut.ar_rp}; ia_l = dut.ar_l;
-			for (i = 0; i < 256; i = i + 1) lm[i] = dut.lmem[i];
+			for (i = 0; i < 256; i = i + 1) lm[i] = hw_lm(i[7:0]);
 			for (i = 0; i < 256; i = i + 1) ilut[i] = dut.lut[i];
 			for (i = 2; i < 8; i = i + 1) begin
 				ipt_tag[i] = dut.pt_tag[i]; ipt_op[i] = dut.pt_op[i]; ipt_val[i] = dut.pt_val[i];

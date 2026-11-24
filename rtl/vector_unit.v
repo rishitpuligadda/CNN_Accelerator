@@ -4,6 +4,10 @@ module vector_unit #(
     parameter PM_AW = 6,
     parameter LM_AW = 8
 ) (
+`ifdef USE_POWER_PINS
+    inout                        vccd1,
+    inout                        vssd1,
+`endif
     input                        clk,
     input                        rst_n,
 
@@ -183,7 +187,6 @@ module vector_unit #(
 	reg  [31:0]          ar_base;
 	reg  [15:0]          ar_chp, ar_rp;
 	reg  [1:0]           ar_l;
-	reg  [LANES*32-1:0]  lmem [0:(1<<LM_AW)-1];
 	reg  [15:0]          lut  [0:255];
 	reg                  rcp_busy;
 	reg  [5:0]           rcp_cnt;
@@ -291,7 +294,8 @@ module vector_unit #(
 	                              + {24'd0, (cur_row >> ar_l)} * {16'd0, ar_rp}
 	                              + {24'd0, (cur_col >> (ar_l + LB))};
 	reg  [LANES-1:0]     au_pv;
-	wire [7:0]           au_sh    = (cur_col >> ar_l) & 8'(LANES - 1);
+	localparam integer   LANE_M   = LANES - 1;
+	wire [7:0]           au_sh    = (cur_col >> ar_l) & LANE_M[7:0];
 	wire [LANES-1:0]     au_pbe   = au_pv << au_sh;
 	wire [31:0]          au_lmidx = {24'd0, 1'b0, cur_chan[1:0], 5'd0} + {24'd0, (cur_col >> LB)};
 	integer              aj;
@@ -325,7 +329,8 @@ module vector_unit #(
 	reg  [2:0]           ld_dst_q1, ld_dst_q2;
 	reg  [LANES-1:0]     ld_lanes_q1, ld_lanes_q2;
 	reg  [1:0]           ld_slot_q1;
-	reg  [LANES*32-1:0]  ld_raw_q, ld_res_q;
+	wire [LANES*32-1:0]  ld_raw_q;            // local-memory read data, valid in the cycle after the LDS/LDS8
+	reg  [LANES*32-1:0]  ld_res_q;
 	reg  [LANES*32-1:0]  ld_conv;
 	integer              lk;
 	always @* begin
@@ -502,7 +507,6 @@ module vector_unit #(
 			ld_lanes_q1 <= {LANES{1'b0}};
 			ld_lanes_q2 <= {LANES{1'b0}};
 			ld_slot_q1 <= 2'd0;
-			ld_raw_q   <= {(LANES*32){1'b0}};
 			ld_res_q   <= {(LANES*32){1'b0}};
 			s_lanes_q1 <= {LANES{1'b0}};
 			s_lanes_q2 <= {LANES{1'b0}};
@@ -590,8 +594,6 @@ module vector_unit #(
 			ld_dst_q1   <= fd[2:0];
 			ld_lanes_q1 <= wlanes;
 			ld_slot_q1  <= sda[1:0];
-			if (exec && ld_op)
-				ld_raw_q <= lmem[(op == OP_LDS8) ? sda[LM_AW+1:2] : sda[LM_AW-1:0]];
 			ld_q2       <= ld_q1;
 			ld_dst_q2   <= ld_dst_q1;
 			ld_lanes_q2 <= ld_lanes_q1;
@@ -738,16 +740,75 @@ module vector_unit #(
 		else if (exec && op == OP_LUTW) lut[sda[7:0]] <= sdb[15:0];
 	end
 
-	integer sk;
+	// ---------------------------------------------------------------- local memory: 2^LM_AW entries x LANES x 32 bits
+	// Lane k is one 32-bit column. Writes (STS, STS8) use port 0 with a byte mask, reads (LDS, LDS8) port 1;
+	// the read is registered: the address is taken at the end of the LDS cycle, the data is used in the next one.
+	// One instruction per cycle, so a read and a write never hit the memory in the same cycle.
+	wire                 lm_we    = exec && (op == OP_STS || op == OP_STS8);
+	wire [LM_AW-1:0]     lm_waddr = (op == OP_STS8) ? sdb[LM_AW+1:2] : sdb[LM_AW-1:0];
+	wire                 lm_re    = exec && ld_op;
+	wire [LM_AW-1:0]     lm_raddr = (op == OP_LDS8) ? sda[LM_AW+1:2] : sda[LM_AW-1:0];
+	wire [LANES*32-1:0]  lm_wdata;
+	wire [LANES*4-1:0]   lm_wmask;
+
+	genvar lk2;
+	generate
+		for (lk2 = 0; lk2 < LANES; lk2 = lk2 + 1) begin : LMW
+			wire signed [31:0] v  = vda[lk2*32 +: 32];
+			wire        [7:0]  b8 = (v < -32'sd128) ? 8'h80 : ((v > 32'sd127) ? 8'h7F : v[7:0]);   // STS8 saturates
+			assign lm_wdata[lk2*32 +: 32] = (op == OP_STS8) ? {4{b8}} : v;
+			assign lm_wmask[lk2*4 +: 4]   = !wlanes[lk2]      ? 4'b0000 :
+			                                (op == OP_STS8)   ? (4'b0001 << sdb[1:0]) : 4'b1111;
+		end
+	endgenerate
+
+`ifndef USE_SRAM_MACRO
+	// behavioural model (simulation)
+	reg  [LANES*32-1:0]  lmem [0:(1<<LM_AW)-1];
+	reg  [LANES*32-1:0]  lm_rdata_q;
+	integer sk, sb;
 	always @(posedge clk) begin
-		if (exec && op == OP_STS)
+		if (lm_we)
 			for (sk = 0; sk < LANES; sk = sk + 1)
-				if (wlanes[sk]) lmem[sdb[LM_AW-1:0]][sk*32 +: 32] <= vda[sk*32 +: 32];
-		if (exec && op == OP_STS8)
-			for (sk = 0; sk < LANES; sk = sk + 1)
-				if (wlanes[sk])
-					lmem[sdb[LM_AW+1:2]][sk*32 + sdb[1:0]*8 +: 8] <=
-						($signed(vda[sk*32 +: 32]) < -32'sd128) ? 8'h80 :
-						(($signed(vda[sk*32 +: 32]) > 32'sd127) ? 8'h7F : vda[sk*32 +: 8]);
+				for (sb = 0; sb < 4; sb = sb + 1)
+					if (lm_wmask[sk*4 + sb]) lmem[lm_waddr][sk*32 + sb*8 +: 8] <= lm_wdata[sk*32 + sb*8 +: 8];
+		if (lm_re) lm_rdata_q <= lmem[lm_raddr];
 	end
+	assign ld_raw_q = lm_rdata_q;
+`else
+	// one sky130_sram_1kbyte_1rw1r_32x256_8 per lane (256 words x 32 bits, byte write mask)
+`ifndef SYNTHESIS
+	initial if (LM_AW != 8) begin
+		$display("ERROR: %m the SRAM macro holds 256 entries, LM_AW must be 8");
+		$finish;
+	end
+`endif
+	genvar lm;
+	generate
+		for (lm = 0; lm < LANES; lm = lm + 1) begin : LM
+			wire [31:0] unused_dout0;
+			sky130_sram_1kbyte_1rw1r_32x256_8
+`ifndef SYNTHESIS
+			#(.VERBOSE(0))
+`endif
+			u_mac (
+`ifdef USE_POWER_PINS
+				.vccd1(vccd1),
+				.vssd1(vssd1),
+`endif
+				.clk0(clk),
+				.csb0(~(lm_we && (|lm_wmask[lm*4 +: 4]))),
+				.web0(1'b0),
+				.wmask0(lm_wmask[lm*4 +: 4]),
+				.addr0(lm_waddr),
+				.din0(lm_wdata[lm*32 +: 32]),
+				.dout0(unused_dout0),
+				.clk1(clk),
+				.csb1(~lm_re),
+				.addr1(lm_raddr),
+				.dout1(ld_raw_q[lm*32 +: 32])
+			);
+		end
+	endgenerate
+`endif
 endmodule
