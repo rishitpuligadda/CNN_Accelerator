@@ -28,6 +28,7 @@ module vu_lane (
 	localparam L_CLAMP8 = 4'd9;
 	localparam L_MUL    = 4'd10;
 	localparam L_REQ    = 4'd11;
+	localparam L_SHRRV  = 4'd12;     // rounding arithmetic shift right by each lane's own b[4:0]
 
 	wire                slow = (lop == L_MUL) || (lop == L_REQ);
 
@@ -35,8 +36,9 @@ module vu_lane (
 	wire signed [31:0]  clamped = (lifted < hi) ? lifted : hi;
 	wire signed [31:0]  sat8    = (clamped < -32'sd128) ? -32'sd128 :
 	                              ((clamped > 32'sd127) ? 32'sd127 : clamped);
-	wire signed [31:0]  shr     = a >>> sh;
-	wire                rbit    = (sh == 5'd0) ? 1'b0 : a[sh - 5'd1];
+	wire        [4:0]   sha     = (lop == L_SHRRV) ? b[4:0] : sh;
+	wire signed [31:0]  shr     = a >>> sha;
+	wire                rbit    = (sha == 5'd0) ? 1'b0 : a[sha - 5'd1];
 
 	reg  signed [31:0]  fast;
 
@@ -49,6 +51,7 @@ module vu_lane (
 			L_SHL:    fast = a <<< sh;
 			L_SHR:    fast = shr;
 			L_SHRR:   fast = shr + {31'd0, rbit};
+			L_SHRRV:  fast = shr + {31'd0, rbit};
 			L_CLAMP:  fast = clamped;
 			L_CLAMP8: fast = sat8;
 			L_PASS:   fast = a;
@@ -96,3 +99,4 @@ module vu_lane (
 		end
 	end
 endmodule
+

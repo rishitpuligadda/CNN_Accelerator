@@ -20,7 +20,7 @@ module tb_vu_iss;
 
 	reg                 clk, rst_n;
 	reg                 lut_we_tb;
-	reg  [7:0]          lut_wa_tb;
+	reg  [3:0]          lut_wa_tb;
 	reg  [15:0]         lut_wd_tb;
 	reg                 pm_we;
 	reg  [5:0]          pm_waddr;
@@ -82,7 +82,7 @@ module tb_vu_iss;
 	reg  [9:0]          ipt_val [2:7];
 	reg  [31:0]         prog_mem [0:63];
 	reg  [W-1:0]        lm  [0:255];
-	reg  [15:0]         ilut [0:255];
+	reg  [15:0]         ilut [0:15];
 	reg  [31:0]         ia_base, ia_chp, ia_rp;
 	reg  [1:0]          ia_l;
 
@@ -230,7 +230,7 @@ module tb_vu_iss;
 					for (i = 0; i < LANES; i = i + 1) if (ibe[i]) c = c + va[i*32 +: 32];
 					is[d] = c;
 				end
-				6'h3D: ilut[is[a][7:0]] = is[b][15:0];
+				6'h3D: ilut[is[a][3:0]] = is[b][15:0];
 				6'h0F: if (d != 0) is[d] = is[a] << is[b][4:0];
 				6'h14: case (x[1:0])
 					2'd0: ia_base = is[a];
@@ -281,7 +281,7 @@ module tb_vu_iss;
 				6'h2B: imask = ibe;
 				6'h09: begin iqp[d[1:0]] = is[a][15:0]; iqn[d[1:0]] = is[b][15:0]; iqs[d[1:0]] = x[5:0]; end
 				6'h0A: begin icl[d[1:0]] = is[a]; ich[d[1:0]] = is[b]; end
-				6'h23, 6'h10, 6'h11, 6'h12, 6'h13, 6'h2A, 6'h18, 6'h19, 6'h1A, 6'h1B, 6'h1C, 6'h1D, 6'h1E, 6'h1F,
+				6'h23, 6'h24, 6'h10, 6'h11, 6'h12, 6'h13, 6'h2A, 6'h18, 6'h19, 6'h1A, 6'h1B, 6'h1C, 6'h1D, 6'h1E, 6'h1F,
 				6'h20, 6'h21, 6'h22, 6'h30, 6'h31, 6'h34, 6'h35: begin
 					for (i = 0; i < LANES; i = i + 1) begin
 						la = va[i*32 +: 32];
@@ -292,7 +292,8 @@ module tb_vu_iss;
 							6'h12: c = is[a];
 							6'h13: c = i;
 							6'h2A: c = imask[i] ? la : lb;
-							6'h23: c = {{16{ilut[la[7:0]][15]}}, ilut[la[7:0]]};
+							6'h23: c = {{16{ilut[la[3:0]][15]}}, ilut[la[3:0]]};
+							6'h24: c = f_shrr(la, lb[4:0]);
 							6'h34: c = va[x[2*i +: 2]*32 +: 32];
 							6'h35: c = va[is[b][2*i +: 2]*32 +: 32];
 							6'h30, 6'h31: begin
@@ -387,7 +388,7 @@ module tb_vu_iss;
 		reg [10:0] x;
 		begin
 			d = 4'($random); a = 4'($random); b = 4'($random); x = 11'($random);
-			k = (must_store != 0) ? 21 : {$random} % 60;
+			k = (must_store != 0) ? 21 : {$random} % 62;
 			case (k)
 				0:  op = 6'h01;  1: op = 6'h02;  2: op = 6'h03;  3: op = 6'h08;
 				4:  op = 6'h09;  5: op = 6'h0A;  6: op = 6'h10;  7: op = 6'h11;
@@ -405,7 +406,7 @@ module tb_vu_iss;
 				46: op = 6'h39; 47: op = 6'h3B; 48: op = 6'h3C; 49: op = 6'h3E;
 				50: op = 6'h3F; 51: op = 6'h3B; 52: op = 6'h3C; 53: op = 6'h08;
 				54: op = 6'h32; 55: op = 6'h33; 56: op = 6'h23; 57: op = 6'h23;
-				58: op = 6'h3D; default: op = 6'h0B;
+				58: op = 6'h3D; 59: op = 6'h0B; default: op = 6'h24;
 			endcase
 			if (op == 6'h09 && x[5:0] > 6'd47) x[5:0] = x[5:0] - 6'd16;
 			if (op == 6'h08 && ({$random} % 2) == 1) x[3:0] = 4'(6 + {$random} % 4);
@@ -522,7 +523,7 @@ module tb_vu_iss;
 					state_err = state_err + 1;
 					if (state_err <= 10) $display("FAIL program %0d: local memory entry %0d differs", cur_prog, i);
 				end
-			for (i = 0; i < 256; i = i + 1)
+			for (i = 0; i < 16; i = i + 1)
 				if (dut.lut[i] !== ilut[i]) begin
 					state_err = state_err + 1;
 					if (state_err <= 10) $display("FAIL program %0d: lookup-table entry %0d differs", cur_prog, i);
@@ -613,7 +614,7 @@ module tb_vu_iss;
 			irow = dut.cur_row; icol = dut.cur_col; ichan = dut.cur_chan; ilast = dut.cur_last; imask = dut.mask;
 			ia_base = dut.ar_base; ia_chp = {16'd0, dut.ar_chp}; ia_rp = {16'd0, dut.ar_rp}; ia_l = dut.ar_l;
 			for (i = 0; i < 256; i = i + 1) lm[i] = hw_lm(i[7:0]);
-			for (i = 0; i < 256; i = i + 1) ilut[i] = dut.lut[i];
+			for (i = 0; i < 16; i = i + 1) ilut[i] = dut.lut[i];
 			for (i = 2; i < 8; i = i + 1) begin
 				ipt_tag[i] = dut.pt_tag[i]; ipt_op[i] = dut.pt_op[i]; ipt_val[i] = dut.pt_val[i];
 			end
@@ -670,14 +671,14 @@ module tb_vu_iss;
 		end
 		iss_reset;
 
-		lut_we_tb = 1'b0; lut_wa_tb = 8'd0; lut_wd_tb = 16'd0;
+		lut_we_tb = 1'b0; lut_wa_tb = 4'd0; lut_wd_tb = 16'd0;
 		rst_n = 1'b0;
 		repeat (2) @(negedge clk);
 		rst_n = 1'b1;
-		for (n = 0; n < 256; n = n + 1) begin
+		for (n = 0; n < 16; n = n + 1) begin
 			@(negedge clk);
 			lut_we_tb = 1'b1;
-			lut_wa_tb = n[7:0];
+			lut_wa_tb = n[3:0];
 			lut_wd_tb = 16'($random);
 		end
 		@(negedge clk);
@@ -706,8 +707,8 @@ module tb_vu_iss;
 		         op_hist[6'h04], op_hist[6'h05], op_hist[6'h06], op_hist[6'h07], op_hist[6'h0D], op_hist[6'h0C],
 		         op_hist[6'h13], op_hist[6'h28], op_hist[6'h29], op_hist[6'h2A], op_hist[6'h2B]);
 		$display("    MAXP %0d  ADDP %0d  PERM %0d  PERMS %0d", op_hist[6'h30], op_hist[6'h31], op_hist[6'h34], op_hist[6'h35]);
-		$display("    RMAX %0d  RADD %0d  LUT %0d  LUTW %0d  RCP %0d",
-		         op_hist[6'h32], op_hist[6'h33], op_hist[6'h23], op_hist[6'h3D], op_hist[6'h0B]);
+		$display("    RMAX %0d  RADD %0d  LUT %0d  LUTW %0d  RCP %0d  SHRRV %0d",
+		         op_hist[6'h32], op_hist[6'h33], op_hist[6'h23], op_hist[6'h3D], op_hist[6'h0B], op_hist[6'h24]);
 		$display("    MULS %0d  SLLV %0d  SETR %0d  ST8A %0d  LDS %0d  STS %0d  LDS8 %0d  STS8 %0d",
 		         op_hist[6'h0E], op_hist[6'h0F], op_hist[6'h14], op_hist[6'h39], op_hist[6'h3B], op_hist[6'h3C],
 		         op_hist[6'h3E], op_hist[6'h3F]);

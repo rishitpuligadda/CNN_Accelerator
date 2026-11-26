@@ -9,7 +9,7 @@ module tb_vu_xlane;
 
 	reg                 clk, rst_n;
 	reg                 lut_we_tb = 1'b0;
-	reg  [7:0]          lut_wa_tb = 8'd0;
+	reg  [3:0]          lut_wa_tb = 4'd0;
 	reg  [15:0]         lut_wd_tb = 16'd0;
 	reg                 pm_we;
 	reg  [5:0]          pm_waddr;
@@ -102,6 +102,7 @@ module tb_vu_xlane;
 	function [31:0] RADD(input [3:0] d, input [3:0] a);      RADD  = enc(6'h33, d, a, 4'd0, 11'd0);        endfunction
 	function [31:0] LUT(input [3:0] d, input [3:0] a);       LUT   = enc(6'h23, d, a, 4'd0, 11'd0);        endfunction
 	function [31:0] LUTW(input [3:0] a, input [3:0] b);      LUTW  = enc(6'h3D, 4'd0, a, b, 11'd0);        endfunction
+	function [31:0] SHRRV(input [3:0] d, input [3:0] a, input [3:0] b); SHRRV = enc(6'h24, d, a, b, 11'd0); endfunction
 	function [31:0] RCP(input [3:0] d, input [3:0] a, input integer n); RCP = enc(6'h0B, d, a, 4'd0, f11(n)); endfunction
 	function [31:0] BCAST(input [3:0] d, input [3:0] a);     BCAST = enc(6'h12, d, a, 4'd0, 11'd0);        endfunction
 	function [31:0] TAG(input [3:0] d, input integer f);     TAG   = enc(6'h08, d, 4'd0, 4'd0, f11(f));    endfunction
@@ -201,7 +202,7 @@ module tb_vu_xlane;
 		end
 	endfunction
 
-	reg  [15:0] tlut [0:255];
+	reg  [15:0] tlut [0:15];
 	integer     rcp_n;
 
 	function [W-1:0] bcast(input [31:0] v);
@@ -229,7 +230,19 @@ module tb_vu_xlane;
 	function [W-1:0] f_lut(input [W-1:0] v);
 		integer i;
 		for (i = 0; i < LANES; i = i + 1)
-			f_lut[i*32 +: 32] = {{16{tlut[v[i*32 +: 8]][15]}}, tlut[v[i*32 +: 8]]};
+			f_lut[i*32 +: 32] = {{16{tlut[v[i*32 +: 4]][15]}}, tlut[v[i*32 +: 4]]};
+	endfunction
+	// SHRRV with b = a: each lane shifted right (arithmetic, rounding) by its own low 5 bits
+	function [W-1:0] f_shrrv(input [W-1:0] v);
+		integer i;
+		reg signed [63:0] x;
+		reg [4:0] n;
+		for (i = 0; i < LANES; i = i + 1) begin
+			n = v[i*32 +: 5];
+			x = {{32{v[i*32 + 31]}}, v[i*32 +: 32]};
+			if (n != 5'd0) x = (x >>> n) + ((x >>> (n - 5'd1)) & 64'sd1);
+			f_shrrv[i*32 +: 32] = x[31:0];
+		end
 	endfunction
 	function [31:0] f_rcp(input [31:0] d);
 		reg [63:0] q;
@@ -282,6 +295,7 @@ module tb_vu_xlane;
 				33:      r = f_lut(p_data[n]);
 				34:      r = f_lut(p_data[n]);
 				35:      r = bcast(f_rcp(p_data[n][31:0]));
+				36:      r = f_shrrv(p_data[n]);
 				default: r = f_pair(p_data[n]);
 			endcase
 			expected = r;
@@ -356,7 +370,7 @@ module tb_vu_xlane;
 				end
 				nst = nst + 1;
 				if (nst == 4) begin
-					if (test == 34) tlut[p_row[pk_done]] = {p_chan[pk_done], p_col[pk_done]};
+					if (test == 34) tlut[p_row[pk_done][3:0]] = {p_chan[pk_done], p_col[pk_done]};
 					checked = checked + 1;
 					if (got !== expected(pk_done)) begin
 						errors = errors + 1;
@@ -508,14 +522,14 @@ module tb_vu_xlane;
 	task load_lut_random;
 		integer i;
 		begin
-			for (i = 0; i < 256; i = i + 1) begin
+			for (i = 0; i < 16; i = i + 1) begin
 				case (i)
-					0: tlut[i] = 16'h8000;  1: tlut[i] = 16'h7FFF;  255: tlut[i] = 16'hFFFF;  128: tlut[i] = 16'h0001;
+					0: tlut[i] = 16'h8000;  1: tlut[i] = 16'h7FFF;  15: tlut[i] = 16'hFFFF;  8: tlut[i] = 16'h0001;
 					default: tlut[i] = 16'($random);
 				endcase
 				@(negedge clk);
 				lut_we_tb = 1'b1;
-				lut_wa_tb = i[7:0];
+				lut_wa_tb = i[3:0];
 				lut_wd_tb = tlut[i];
 			end
 			@(negedge clk);
@@ -845,10 +859,10 @@ module tb_vu_xlane;
 		run("    random values, random be:           ", 400, 70, 0);
 
 		$display("");
-		$display("LUT vd, va: vd[i] = sign_extend(table[va[i] bits 7:0]) - the index is the low byte, unsigned");
-		$display("LUTW sa, sb: table[sa bits 7:0] = sb bits 15:0");
+		$display("LUT vd, va: vd[i] = sign_extend(table[va[i] bits 3:0]) - 16 entries, the index is the low 4 bits");
+		$display("LUTW sa, sb: table[sa bits 3:0] = sb bits 15:0");
 		$display("");
-		$display("33) LUT v0,v7 with a random table (loaded through the table port), every index 0..255:");
+		$display("33) LUT v0,v7 with a random table (loaded through the table port), every index 0..15:");
 		test = 33; sec = 33;
 		load_lut_random;
 		begin_program; begin_body;
@@ -912,10 +926,28 @@ module tb_vu_xlane;
 		end
 
 		$display("");
+		$display("");
+		$display("SHRRV vd, va, vb: vd[i] = va[i] >>> vb[i] bits 4:0, rounded (adds the last bit shifted out)");
+		$display("");
+		$display("36) SHRRV v0,v7,v7 - every lane shifted by its own low 5 bits:");
+		test = 36; sec = 36;
+		begin_program; begin_body;
+		emit(SHRRV(0, 7, 7));
+		emit_dump;
+		load_program;
+		for (np = 0; np < 300; np = np + 1) begin
+			for (pt = 0; pt < LANES; pt = pt + 1)
+				p_data[np][pt*32 +: 32] = (np < 64) ? {((np % 2) == 1) ? 27'h4000000 : 27'($random), 5'((np / 2 + pt) % 32)} : 32'($random);
+			p_be[np] = {LANES{1'b1}};
+		end
+		run("    all shift amounts, random values:   ", 300, 100, 3);
+
+		$display("");
 		$display("Totals: %0d packets checked (4 stores each), %0d errors", checked, errors);
 		$display("");
 		if (errors != 0) $fatal(1, "FAIL");
-		$display("PASS: every MAXP, ADDP, PERM, PERMS, RMAX, RADD, LUT, LUTW and RCP result matches the spec");
+		$display("PASS: every MAXP, ADDP, PERM, PERMS, RMAX, RADD, LUT, LUTW, RCP and SHRRV result matches the spec");
 		$finish;
 	end
 endmodule
+

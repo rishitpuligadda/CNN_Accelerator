@@ -39,10 +39,12 @@ def program(L, ql, out_h, out_w):
               venc(0x0C, 0, 2, 0, 1, (0 << 5) | (2 << 3) | 2),  # P2: row, low 1 bit == 0
               venc(0x0C, 0, 3, 0, 1, (1 << 5) | (2 << 3) | 2)]  # P3: row, low 1 bit == 1
     if mode == 4:
-        p += [LI(4, 0), venc(0x0A, 0, 2, 3, 4, 0),             # c2 = -128..0
-              LI(3, 0), LI(4, 127), venc(0x0A, 0, 1, 3, 4, 0), # c1 = 0..127
-              venc(0x11, 0, 6, 0, 0xF, 0x780),                 # VLI v6, -128
-              venc(0x11, 0, 5, 0, 0, 0),                       # VLI v5, 0
+        p += [LI(3, 0), LI(4, chipnet.M_MAX), venc(0x0A, 0, 2, 3, 4, 0),          # c2 = 0..8191 (max - logit)
+              LI(4, 127), venc(0x0A, 0, 1, 3, 4, 0),                            # c1 = 0..127 (probability)
+              LI(3, chipnet.LOGIT_LO), LI(4, chipnet.LOGIT_HI), venc(0x0A, 0, 3, 3, 4, 0),  # c3 = 16-bit logit
+              venc(0x12, 0, 6, 3, 0, 0),                                        # BCAST v6, s3 (running max)
+              venc(0x11, 0, 5, 0, 0, 0),                                        # VLI v5, 0 (running sum)
+              venc(0x11, 0, 4, 0, 0, chipnet.LN2_K),                            # VLI v4, 177 (ln2/256 * 2^16)
               LI(10, 1), LI(11, 1)]
     s_pro = len(p)
     body = len(p)
@@ -61,16 +63,22 @@ def program(L, ql, out_h, out_w):
               venc(0x08, 0, 5, 0, 0, 7),                       # TAG s5, pbe
               venc(0x39, 3, 5, 1, 9, 0)]                       # [p3] ST8A v1, s9, s5, c0
     if mode == 4:
-        p += [venc(0x22, 0, 0, 0, 0, 0),                       # CLAMP v0, v0, c0
+        p += [venc(0x22, 0, 0, 0, 0, 3),                       # CLAMP v0, v0, c3 (16-bit logit)
               venc(0x08, 0, 1, 0, 0, 4),                       # TAG s1, chan
               venc(0x3C, 0, 0, 0, 1, 0),                       # STS v0, s1
               venc(0x1B, 0, 6, 6, 0, 0)]                       # MAX v6, v6, v0
     e0 = len(p)
     if mode == 4:
         p += [venc(0x08, 0, 1, 0, 0, 9), venc(0x3B, 0, 1, 1, 0, 0),    # TAG s1, iter;  LDS v1, s1
-              venc(0x19, 0, 1, 1, 6, 0), venc(0x22, 0, 1, 1, 0, 2),    # SUB v1, v1, v6; CLAMP c2
-              venc(0x23, 0, 1, 1, 0, 0), venc(0x3C, 0, 0, 1, 1, 0),    # LUT v1, v1;     STS v1, s1
-              venc(0x18, 0, 5, 5, 1, 0)]                               # ADD v5, v5, v1
+              venc(0x19, 0, 1, 6, 1, 0), venc(0x22, 0, 1, 1, 0, 2),    # SUB v1, v6, v1 (m = max - y); CLAMP c2
+              venc(0x1E, 0, 3, 1, 0, 4),                               # SHR v3, v1, 4      j
+              venc(0x1D, 0, 2, 3, 0, 4), venc(0x19, 0, 2, 1, 2, 0),    # SHL v2, v3, 4; SUB v2, v1, v2   r = m & 15
+              venc(0x20, 0, 2, 2, 4, 0),                               # MUL v2, v2, v4     r * 177
+              venc(0x23, 0, 3, 3, 0, 0),                               # LUT v3, v3         t = 2^(-j/16), Q14
+              venc(0x20, 0, 2, 3, 2, 0), venc(0x1F, 0, 2, 2, 0, 16),   # MUL v2, v3, v2; SHRR v2, 16
+              venc(0x19, 0, 3, 3, 2, 0),                               # SUB v3, v3, v2     t * 2^(-r/256)
+              venc(0x1E, 0, 2, 1, 0, 8), venc(0x24, 0, 3, 3, 2, 0),    # SHR v2, v1, 8; SHRRV v3, v3, v2   e
+              venc(0x3C, 0, 0, 3, 1, 0), venc(0x18, 0, 5, 5, 3, 0)]    # STS v3, s1; ADD v5, v5, v3
     e1 = len(p)
     if mode == 4:
         p += [venc(0x33, 0, 2, 5, 0, 0), venc(0x0B, 0, 3, 2, 0, 30),   # RADD s2, v5;  RCP s3, s2, 30
@@ -115,7 +123,7 @@ def compile_network(layers, q, table, in_c, in_h, in_w):
                 mem[wptr + 4 + k] = word
             wptr += m + 4
         prog, sects, mode = program(L, ql, sh, sw)
-        nlut = 256 if mode == 4 else 0
+        nlut = 16 if mode == 4 else 0
         last = li == n - 1
         wb_words = chipnet.map_words(L["cout"], sh, sw)
         hdr = [
@@ -220,7 +228,7 @@ def report_and_write(layers, params, xtr, xte, yte, outdir, float_logits, in_sca
               f"{', softmax' if L['softmax'] else ''}): requantization "
               f"{ql['s_in'] * ql['s_w'] / ql['s_out']:.6f} ~ M {ql['M']} / 2^{ql['S']}")
     if layers[-1]["softmax"]:
-        print(f"   exp table: one logit step = {q[-1]['s_out']:.4f}")
+        print(f"   softmax: 16-bit logits in base-2 units (one step = 1/256), exp by a 16-entry table + shift")
 
     print(f"\n3) The integer model (bit-exact with the chip) on {len(xte)} test images:")
     xq = chipnet.input_int8(xte, in_scale)
@@ -239,3 +247,4 @@ def report_and_write(layers, params, xtr, xte, yte, outdir, float_logits, in_sca
     n = write_files(outdir, layers, entries, xq, yte, results, float_acc, int_acc, n_rtl)
     print(f"   wrote {len(mem)} words of weights and table, and {n} test images for the RTL, to {outdir}")
     return float_acc, int_acc
+

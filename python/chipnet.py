@@ -11,8 +11,12 @@ and per layer float parameters (w with shape (cout, cin, kh, kw), b with shape (
 All integer arithmetic mirrors the chip (spec vector_isa.md):
   REQ:   y = acc * (acc < 0 ? M_neg : M);  y = (y >> S) + ((y >> (S-1)) & 1) if S > 0;  saturate to int32
   store: saturate to int8;  pool: 2x2 max of the stored int8 values (floor for odd sizes)
-  softmax: d = clamp(logit - max, -128, 0); e = table[d & 255]; R = floor(2^30 / sum e);
-           q = SHRR(low32(R * e), 23) clamped to 0..127  (probability x 128)
+  softmax (base 2): the last layer's logits come out as y = round(z * log2(e) * 256), i.e. in base-2 units with
+           8 fraction bits, clamped to -32768..32767 (the compiler folds log2(e) into M/2^S);
+           m = clamp(max - y, 0, 8191); j = m >> 4; r = m & 15; t = table[j & 15]   (table[k] = 2^(-k/16), Q14)
+           t = t - SHRR(t * (r * 177), 16)          (2^(-r/256) ~ 1 - r ln2/256; 177 = ln2/256 * 2^16)
+           e = SHRR(t, m >> 8)                       (times 2^-(integer part): a per-lane shift)
+           R = floor(2^30 / sum e);  q = SHRR(low32(R * e), 23) clamped to 0..127  (probability x 128)
 """
 import numpy as np
 
@@ -116,16 +120,44 @@ def quantize(layers, params, xcal, s_in=1.0 / 127.0):
         s_w = float(np.abs(w).max()) / 127.0 or 1.0
         wq = np.clip(np.round(w / s_w), -127, 127).astype(np.int64)
         bq = np.round(b / (s_in * s_w)).astype(np.int64)
-        s_out = float(np.abs(a).max()) / 127.0 or 1.0
+        if L["softmax"]:
+            s_out = 1.0 / (LOGIT_FRAC * np.log2(np.e))   # logits in base-2 units, 8 fraction bits (16-bit)
+        else:
+            s_out = float(np.abs(a).max()) / 127.0 or 1.0
         m, s = quantize_factor(s_in * s_w / s_out)
         if m < 1:
             m = 1
         q.append(dict(wq=wq, bq=bq, M=m, S=s, M_neg=0 if L["relu"] else m, s_in=s_in, s_w=s_w, s_out=s_out))
         s_in = s_out
-    s_logit = q[-1]["s_out"]
-    table = np.array([int(round(32767 * np.exp(((t - 256) if t >= 128 else 0) * s_logit))) for t in range(256)],
-                     dtype=np.int64)
-    return q, table
+    return q, exp2_table()
+
+
+LOGIT_FRAC = 256          # softmax logits: 8 fraction bits in base-2 units
+LOGIT_LO, LOGIT_HI = -32768, 32767
+M_MAX = 8191              # max - logit is clamped to this (2^-32 and beyond is 0)
+LN2_K = 177               # ln(2) / 256 * 2^16
+
+
+def exp2_table():
+    """The vector unit's 16-entry table for softmax: 2^(-k/16) in Q14 (same for every network)."""
+    return np.array([int(round(16384 * 2.0 ** (-k / 16))) for k in range(16)], dtype=np.int64)
+
+
+def shrr(y, n):
+    """Rounding arithmetic shift right (SHRR / SHRRV); n may be an array."""
+    y = np.asarray(y, dtype=np.int64)
+    n = np.asarray(n, dtype=np.int64)
+    return np.where(n == 0, y, (y >> n) + ((y >> np.maximum(n - 1, 0)) & 1))
+
+
+def softmax_exp(y, table):
+    """e for each logit exactly as the chip's softmax program computes it."""
+    m = np.clip(y.max() - y, 0, M_MAX)
+    j = m >> 4
+    r = m - (j << 4)
+    t = table[j & 15]
+    t = t - shrr(t * (r * LN2_K), 16)
+    return shrr(t, m >> 8)
 
 
 def input_int8(x, scale=127.0):
@@ -148,18 +180,21 @@ def golden(layers, q, table, xi):
     for L, ql in zip(layers, q):
         cols, oh, ow = im2col(x, L["kh"], L["kw"], L["stride"], L["pad"])
         acc = (cols @ ql["wq"].reshape(ql["wq"].shape[0], -1).T + ql["bq"]).reshape(1, oh, ow, -1).transpose(0, 3, 1, 2)
-        y = np.clip(req(acc, ql["M"], ql["M_neg"], ql["S"]), -128, 127)
+        if L["softmax"]:
+            y = np.clip(req(acc, ql["M"], ql["M_neg"], ql["S"]), LOGIT_LO, LOGIT_HI)   # 16-bit logits
+        else:
+            y = np.clip(req(acc, ql["M"], ql["M_neg"], ql["S"]), -128, 127)
         if L["pool"]:
             y = pool2(y)
         maps.append(y[0])
         x = y
     out = maps[-1][:, 0, 0]
     if layers[-1]["softmax"]:
-        d = np.clip(out - out.max(), -128, 0)
-        e = table[d & 255]
+        e = softmax_exp(out, table)
         r = (1 << 30) // int(e.sum())
         p = (r * e) & 0xFFFFFFFF
         p = np.where(p >= 2 ** 31, p - 2 ** 32, p)
         out = np.clip((p >> 23) + ((p >> 22) & 1), 0, 127)
         maps[-1] = out.reshape(-1, 1, 1)                 # the last layer stores the probabilities
     return maps, out
+

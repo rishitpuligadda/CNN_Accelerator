@@ -9,7 +9,7 @@ module tb_vu_pred;
 
 	reg                 clk, rst_n;
 	reg                 lut_we_tb = 1'b0;
-	reg  [7:0]          lut_wa_tb = 8'd0;
+	reg  [3:0]          lut_wa_tb = 4'd0;
 	reg  [15:0]         lut_wd_tb = 16'd0;
 	reg                 pm_we;
 	reg  [5:0]          pm_waddr;
@@ -361,3 +361,4 @@ module tb_vu_pred;
 		$finish;
 	end
 endmodule
+

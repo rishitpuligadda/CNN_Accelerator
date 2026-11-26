@@ -208,7 +208,8 @@ module layer_seq #(
 								lidx   <= 9'd0;
 							end
 							10'd6, 10'd7, 10'd8, 10'd9, 10'd10, 10'd11:
-								sect[sidx_f] <= rd_resp_data[21:0];
+								for (k = 0; k < 6; k = k + 1)
+									if (sidx_f == k[2:0]) sect[k] <= rd_resp_data[21:0];
 							default: begin
 								vcfg_we <= 1'b1;
 								if (widx < 10'd12 + {3'd0, n_prog}) begin
@@ -293,3 +294,4 @@ module layer_seq #(
 		end
 	end
 endmodule
+

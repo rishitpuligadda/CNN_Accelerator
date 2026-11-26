@@ -14,7 +14,6 @@ module tb_network;
 	localparam WB_EB  = 57344;
 	localparam ML     = 8;               // layers per network, at most
 	localparam MS     = 32 * 32 * 64;    // largest map (elements): up to 64 channels
-	localparam real SM_STEP = 0.1;
 
 	reg                 clk, rst_n, start;
 	wire                busy, done, err_valid;
@@ -100,7 +99,8 @@ module tb_network;
 	reg signed [7:0]  ref_out [0:ML*MS-1];        // every layer's reference output map
 	reg signed [7:0]  hw_out  [0:ML*MS-1];        // every layer's map as stored by the vector unit
 	integer           hw_wr   [0:ML*MS-1];
-	reg        [15:0] exp_tab [0:255];
+	reg        [15:0] exp_tab [0:15];          // softmax: 2^(-k/16) in Q14
+	reg signed [31:0] lg_ref  [0:63];          // the softmax layer's 16-bit logits (base 2, 8 fraction bits)
 
 	function integer mi(input integer c, input integer y, input integer x);
 		mi = (c * 32 + y) * 32 + x;
@@ -173,7 +173,7 @@ module tb_network;
 						if (v > mx) mx = v;
 					end
 			// requantization from the layer's range
-			sc = 120.0 / mx;
+			sc = ((LMODE[l] == 4) ? 3000.0 : 120.0) / mx;       // softmax layer: 16-bit logits
 			QS[l] = 0;
 			while ($rtoi(sc * (2.0 ** (QS[l] + 1)) + 0.5) <= 32767 && QS[l] < 47) QS[l] = QS[l] + 1;
 			QM[l] = $rtoi(sc * (2.0 ** QS[l]) + 0.5);
@@ -189,6 +189,11 @@ module tb_network;
 							end
 							ref_out[l * MS + mi(f, oy, ox)] = best;
 						end
+						else if (LMODE[l] == 4) begin
+							d = f_req(acc[mi(f, oy, ox)], QM[l], QM[l], QS[l]);
+							lg_ref[f] = (d > 32767) ? 32767 : ((d < -32768) ? -32768 : d);
+							ref_out[l * MS + mi(f, oy, ox)] = 8'd0;              // stored as probabilities instead
+						end
 						else
 							ref_out[l * MS + mi(f, oy, ox)] = sat8(f_req(acc[mi(f, oy, ox)], QM[l], (LMODE[l] == 1) ? 0 : QM[l], QS[l]));
 					end
@@ -199,32 +204,43 @@ module tb_network;
 	reg signed [7:0] sm_q [0:63];
 	real             sm_f [0:63];
 
+	function signed [31:0] shrr32(input signed [31:0] a, input integer n);
+		reg signed [63:0] w;
+		begin
+			w = {{32{a[31]}}, a};
+			if (n != 0) w = (w >>> n) + ((w >>> (n - 1)) & 64'sd1);
+			shrr32 = w[31:0];
+		end
+	endfunction
+
 	task softmax_ref(input integer l);
 		integer i, m;
-		reg signed [31:0] d, sum, r, q;
+		reg signed [31:0] d, sum, r, q, t;
 		reg [63:0] q64;
 		reg [31:0] ex [0:63];
 		real fs;
 		begin
-			m = -128;
-			for (i = 0; i < LF[l]; i = i + 1) if (ref_out[l * MS + mi(i, 0, 0)] > m) m = ref_out[l * MS + mi(i, 0, 0)];
+			m = -32768;
+			for (i = 0; i < LF[l]; i = i + 1) if (lg_ref[i] > m) m = lg_ref[i];
 			sum = 0;
 			for (i = 0; i < LF[l]; i = i + 1) begin
-				d = ref_out[l * MS + mi(i, 0, 0)] - m;
-				if (d < -128) d = -128;
-				ex[i] = {16'd0, exp_tab[d[7:0]]};
+				d = m - lg_ref[i];                                   // 2^(-d/256): table, linear correction, shift
+				if (d > 8191) d = 8191;
+				t = {16'd0, exp_tab[d[7:4]]};
+				t = t - shrr32(t * ((d & 15) * 177), 16);
+				ex[i] = shrr32(t, d >>> 8);
 				sum = sum + ex[i];
 			end
 			q64 = (64'd1 << 30) / {32'd0, sum};
 			r = q64[31:0];
 			fs = 0.0;
-			for (i = 0; i < LF[l]; i = i + 1) fs = fs + $exp(ref_out[l * MS + mi(i, 0, 0)] * SM_STEP);
+			for (i = 0; i < LF[l]; i = i + 1) fs = fs + 2.0 ** ((lg_ref[i] - m) / 256.0);
 			for (i = 0; i < LF[l]; i = i + 1) begin
 				q64 = {32'd0, r} * {32'd0, ex[i]};
 				q   = (q64[31:0] >>> 23) + ((q64[31:0] >>> 22) & 1);
 				if (q > 127) q = 127;
 				sm_q[i] = q[7:0];
-				sm_f[i] = $exp(ref_out[l * MS + mi(i, 0, 0)] * SM_STEP) / fs;
+				sm_f[i] = (2.0 ** ((lg_ref[i] - m) / 256.0)) / fs;
 			end
 		end
 	endtask
@@ -266,11 +282,15 @@ module tb_network;
 				vemit(venc(6'h0C, 3'd0, 4'd3, 4'd0, 4'd1, {6'd1, 2'd2, 3'd2}));        // P3: odd row
 			end
 			if (LMODE[l] == 4) begin
-				vemit(LI(4, 0));  vemit(venc(6'h0A, 3'd0, 4'd2, 4'd3, 4'd4, 11'd0));    // c2 = -128..0
-				vemit(LI(3, 0));  vemit(LI(4, 127));
+				vemit(LI(3, 0));  vemit(LI(4, 8191));
+				vemit(venc(6'h0A, 3'd0, 4'd2, 4'd3, 4'd4, 11'd0));                      // c2 = 0..8191
+				vemit(LI(4, 127));
 				vemit(venc(6'h0A, 3'd0, 4'd1, 4'd3, 4'd4, 11'd0));                      // c1 = 0..127
-				vemit(venc(6'h11, 3'd0, 4'd6, 4'd0, 4'hF, 11'h780));                     // VLI v6, -128
+				vemit(LI(3, -32768)); vemit(LI(4, 32767));
+				vemit(venc(6'h0A, 3'd0, 4'd3, 4'd3, 4'd4, 11'd0));                      // c3 = 16-bit logit
+				vemit(venc(6'h12, 3'd0, 4'd6, 4'd3, 4'd0, 11'd0));                       // BCAST v6, s3 (-32768)
 				vemit(venc(6'h11, 3'd0, 4'd5, 4'd0, 4'd0, 11'd0));                       // VLI v5, 0
+				vemit(venc(6'h11, 3'd0, 4'd4, 4'd0, 4'd0, 11'd177));                     // VLI v4, 177
 				vemit(LI(10, 1)); vemit(LI(11, 1));
 			end
 			s_pro  = np;
@@ -290,7 +310,7 @@ module tb_network;
 				vemit(venc(6'h39, 3'd3, 4'd5, 4'd1, 4'd9, 11'd0));                // [p3] ST8A v1, s9, s5, c0
 			end
 			if (LMODE[l] == 4) begin
-				vemit(venc(6'h22, 3'd0, 4'd0, 4'd0, 4'd0, 11'd0));                // CLAMP v0, v0, c0
+				vemit(venc(6'h22, 3'd0, 4'd0, 4'd0, 4'd0, 11'd3));                // CLAMP v0, v0, c3
 				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd4));                // TAG s1, chan
 				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd0, 4'd1, 11'd0));                // STS v0, s1
 				vemit(venc(6'h1B, 3'd0, 4'd6, 4'd6, 4'd0, 11'd0));                // MAX v6, v6, v0
@@ -299,11 +319,20 @@ module tb_network;
 			if (LMODE[l] == 4) begin
 				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd9));                // TAG s1, iter
 				vemit(venc(6'h3B, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));                // LDS v1, s1
-				vemit(venc(6'h19, 3'd0, 4'd1, 4'd1, 4'd6, 11'd0));                // SUB v1, v1, v6
+				vemit(venc(6'h19, 3'd0, 4'd1, 4'd6, 4'd1, 11'd0));                // SUB v1, v6, v1     m
 				vemit(venc(6'h22, 3'd0, 4'd1, 4'd1, 4'd0, 11'd2));                // CLAMP v1, v1, c2
-				vemit(venc(6'h23, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));                // LUT v1, v1
-				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd1, 4'd1, 11'd0));                // STS v1, s1
-				vemit(venc(6'h18, 3'd0, 4'd5, 4'd5, 4'd1, 11'd0));                // ADD v5, v5, v1
+				vemit(venc(6'h1E, 3'd0, 4'd3, 4'd1, 4'd0, 11'd4));                // SHR v3, v1, 4
+				vemit(venc(6'h1D, 3'd0, 4'd2, 4'd3, 4'd0, 11'd4));                // SHL v2, v3, 4
+				vemit(venc(6'h19, 3'd0, 4'd2, 4'd1, 4'd2, 11'd0));                // SUB v2, v1, v2     m & 15
+				vemit(venc(6'h20, 3'd0, 4'd2, 4'd2, 4'd4, 11'd0));                // MUL v2, v2, v4
+				vemit(venc(6'h23, 3'd0, 4'd3, 4'd3, 4'd0, 11'd0));                // LUT v3, v3
+				vemit(venc(6'h20, 3'd0, 4'd2, 4'd3, 4'd2, 11'd0));                // MUL v2, v3, v2
+				vemit(venc(6'h1F, 3'd0, 4'd2, 4'd2, 4'd0, 11'd16));               // SHRR v2, v2, 16
+				vemit(venc(6'h19, 3'd0, 4'd3, 4'd3, 4'd2, 11'd0));                // SUB v3, v3, v2
+				vemit(venc(6'h1E, 3'd0, 4'd2, 4'd1, 4'd0, 11'd8));                // SHR v2, v1, 8
+				vemit(venc(6'h24, 3'd0, 4'd3, 4'd3, 4'd2, 11'd0));                // SHRRV v3, v3, v2   e
+				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd3, 4'd1, 11'd0));                // STS v3, s1
+				vemit(venc(6'h18, 3'd0, 4'd5, 4'd5, 4'd3, 11'd0));                // ADD v5, v5, v3
 			end
 			s_e1 = np;
 			if (LMODE[l] == 4) begin
@@ -332,7 +361,7 @@ module tb_network;
 		integer i, nlut, words;
 		begin
 			build_program(l);
-			nlut  = (LMODE[l] == 4) ? 256 : 0;
+			nlut  = (LMODE[l] == 4) ? 16 : 0;
 			words = 1 + LF[l] * SOH[l] * ((SOW[l] + 3) / 4);
 			ext_mem[tptr + 0] = {8'(LF[l]), 8'(LC[l]), 8'(LW[l]), 8'(LH[l])};
 			ext_mem[tptr + 1] = {13'd0, (l == nl - 1), (l == nl - 1), (l == 0), 2'd0, ((LMODE[l] == 2) ? 2'd1 : 2'd0),
@@ -505,8 +534,8 @@ module tb_network;
 		lat_min = 1; lat_max = 1; rdy_pct = 100; rdy_r = 1'b1; wrdy_r = 1'b1; mem_on = 1'b0;
 		sq_head = 0; sq_tail = 0; sq_count = 0;
 		for (t = 0; t < EWORDS; t = t + 1) ext_mem[t] = 32'd0;
-		for (t = 0; t < 256; t = t + 1)
-			exp_tab[t] = 16'($rtoi(32767.0 * $exp(((t < 128) ? 0 : t - 256) * SM_STEP) + 0.5));
+		for (t = 0; t < 16; t = t + 1)
+			exp_tab[t] = 16'($rtoi(16384.0 * (2.0 ** (-t / 16.0)) + 0.5));
 		rst_n = 1'b0;
 		repeat (3) @(negedge clk);
 		rst_n = 1'b1;
@@ -570,3 +599,4 @@ module tb_network;
 		$finish;
 	end
 endmodule
+

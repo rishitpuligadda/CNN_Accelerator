@@ -16,7 +16,7 @@ module vector_unit #(
     input      [31:0]            pm_wdata,
 
     input                        lut_we,
-    input      [7:0]             lut_waddr,
+    input      [3:0]             lut_waddr,
     input      [15:0]            lut_wdata,
 
     input      [PM_AW-1:0]       pro_start,
@@ -82,6 +82,7 @@ module vector_unit #(
 	localparam OP_ST8A  = 6'h39;
 	localparam OP_LUTW  = 6'h3D;
 	localparam OP_LUT   = 6'h23;
+	localparam OP_SHRRV = 6'h24;
 	localparam OP_RMAX  = 6'h32;
 	localparam OP_RADD  = 6'h33;
 	localparam OP_LDS   = 6'h3B;
@@ -130,6 +131,7 @@ module vector_unit #(
 	localparam L_CLAMP8 = 4'd9;
 	localparam L_MUL    = 4'd10;
 	localparam L_REQ    = 4'd11;
+	localparam L_SHRRV  = 4'd12;
 
 	reg  [31:0]          pm [0:(1<<PM_AW)-1];
 	reg  [2:0]           state;
@@ -187,7 +189,7 @@ module vector_unit #(
 	reg  [31:0]          ar_base;
 	reg  [15:0]          ar_chp, ar_rp;
 	reg  [1:0]           ar_l;
-	reg  [15:0]          lut  [0:255];
+	reg  [15:0]          lut  [0:15];         // 16-entry table, indexed by the low 4 bits of each lane
 	reg                  rcp_busy;
 	reg  [5:0]           rcp_cnt;
 	reg  [31:0]          rcp_d, rcp_q, rcp_n;
@@ -195,9 +197,10 @@ module vector_unit #(
 	wire [32:0]          rcp_t = {rcp_r, rcp_n[31]};
 	reg  [3:0]           rcp_dst;
 	wire                 rcp_done = rcp_busy && (rcp_cnt == 6'd0);
-	reg  [2:0]           pt_tag [2:7];
-	reg  [1:0]           pt_op  [2:7];
-	reg  [9:0]           pt_val [2:7];
+	reg  [2:0]           pt_tag [0:7];        // predicates P2..P7; slots 0 and 1 stay 0 (P0, P1 are not table entries)
+	reg  [1:0]           pt_op  [0:7];
+	reg  [9:0]           pt_val [0:7];
+	integer              pk2;
 
 	wire                 running = (state == S_PRO) || (state == S_BODY) || (state == S_EPI);
 	wire [31:0]          ins     = pm[pc];
@@ -232,6 +235,7 @@ module vector_unit #(
 			OP_SHL:   begin vec_op = 1'b1; lop = L_SHL;   reads_a = 1'b1; writes_v = 1'b1; end
 			OP_SHR:   begin vec_op = 1'b1; lop = L_SHR;   reads_a = 1'b1; writes_v = 1'b1; end
 			OP_SHRR:  begin vec_op = 1'b1; lop = L_SHRR;  reads_a = 1'b1; writes_v = 1'b1; end
+			OP_SHRRV: begin vec_op = 1'b1; lop = L_SHRRV; reads_a = 1'b1; reads_b = 1'b1; writes_v = 1'b1; end
 			OP_MUL:   begin vec_op = 1'b1; lop = L_MUL;   reads_a = 1'b1; reads_b = 1'b1; writes_v = 1'b1; slow_op = 1'b1; end
 			OP_REQ:   begin vec_op = 1'b1; lop = L_REQ;   reads_a = 1'b1; writes_v = 1'b1; slow_op = 1'b1; end
 			OP_CLAMP: begin vec_op = 1'b1; lop = L_CLAMP; reads_a = 1'b1; writes_v = 1'b1; end
@@ -437,7 +441,7 @@ module vector_unit #(
 			end
 			assign psel = perm_s ? sdb[i*PB +: PB] : psel_imm;
 			wire [31:0] perm_v = vda[psel*32 +: 32];
-			wire [15:0] lut_e  = lut[vda[i*32 +: 8]];
+			wire [15:0] lut_e  = lut[vda[i*32 +: 4]];
 			wire [31:0] lut_v  = {{16{lut_e[15]}}, lut_e};
 			wire [31:0] a_in = a_imm   ? simm15 :
 			                   a_bcast ? sda    :
@@ -482,7 +486,7 @@ module vector_unit #(
 			cur_chan   <= 8'd0;
 			cur_last   <= 1'b0;
 			mask       <= {LANES{1'b0}};
-			for (k = 2; k < 8; k = k + 1) begin
+			for (k = 0; k < 8; k = k + 1) begin
 				pt_tag[k] <= 3'd0;
 				pt_op[k]  <= 2'd0;
 				pt_val[k] <= 10'd0;
@@ -599,11 +603,12 @@ module vector_unit #(
 			ld_lanes_q2 <= ld_lanes_q1;
 			if (ld_q1) ld_res_q <= ld_conv;
 
-			if (exec && op == OP_SETP && fd[2:1] != 2'b00) begin
-				pt_tag[fd[2:0]] <= fx[2:0];
-				pt_op[fd[2:0]]  <= fx[4:3];
-				pt_val[fd[2:0]] <= {fb, fx[10:5]};
-			end
+			for (pk2 = 2; pk2 < 8; pk2 = pk2 + 1)              // predicates P2..P7
+				if (exec && op == OP_SETP && fd[2:0] == pk2[2:0]) begin
+					pt_tag[pk2] <= fx[2:0];
+					pt_op[pk2]  <= fx[4:3];
+					pt_val[pk2] <= {fb, fx[10:5]};
+				end
 
 			st_en <= f_st_q;
 			if (f_st_q) begin
@@ -737,7 +742,7 @@ module vector_unit #(
 	always @(posedge clk) begin
 		if (pm_we) pm[pm_waddr] <= pm_wdata;
 		if (lut_we) lut[lut_waddr] <= lut_wdata;
-		else if (exec && op == OP_LUTW) lut[sda[7:0]] <= sdb[15:0];
+		else if (exec && op == OP_LUTW) lut[sda[3:0]] <= sdb[15:0];
 	end
 
 	// ---------------------------------------------------------------- local memory: 2^LM_AW entries x LANES x 32 bits
@@ -812,3 +817,4 @@ module vector_unit #(
 	endgenerate
 `endif
 endmodule
+

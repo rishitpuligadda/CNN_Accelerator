@@ -320,7 +320,7 @@ module accel_top #(
 `endif
 		.clk(clk), .rst_n(rst_s),
 		.pm_we(vcfg_we && vcfg_addr[9:6] == 4'b0000), .pm_waddr(vcfg_addr[5:0]), .pm_wdata(vcfg_data),
-		.lut_we(vcfg_we && vcfg_addr[9:8] == 2'b01), .lut_waddr(vcfg_addr[7:0]), .lut_wdata(vcfg_data[15:0]),
+		.lut_we(vcfg_we && vcfg_addr[9:8] == 2'b01), .lut_waddr(vcfg_addr[3:0]), .lut_wdata(vcfg_data[15:0]),
 		.pro_start(vs_pro_s), .pro_len(vs_pro_l), .body_start(vs_body_s), .body_len(vs_body_l),
 		.epi_start(vs_epi_s), .epi_len(vs_epi_l),
 		.pro_cnt(vs_pro_c), .epi_cnt(vs_epi_c),

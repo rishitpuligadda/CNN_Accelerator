@@ -389,8 +389,7 @@ module tb_accel_top;
 	integer np_v;
 	reg [31:0] prg_v [0:63];
 	integer s_pro_l, s_body_l, s_body_s, s_e0_s, s_e1_s, s_e2_s, s_e3_s;
-	reg [15:0] exp_tab [0:255];
-	localparam real SM_STEP = 0.1;     // real value of one int8 logit step, for the exp table
+	reg [15:0] exp_tab [0:15];         // softmax: 2^(-k/16) in Q14; logits are 16-bit, base 2, 8 fraction bits
 
 	function [31:0] venc(input [5:0] op, input [2:0] pr, input [3:0] d, input [3:0] a, input [3:0] b, input [10:0] x);
 		venc = {op, pr, d, a, b, x};
@@ -440,7 +439,7 @@ module tb_accel_top;
 						if (v < 0) v = -v;
 						if (v > mx) mx = v;
 					end
-			sc  = 120.0 / mx;
+			sc  = ((vu_mode == 4) ? 3000.0 : 120.0) / mx;     // softmax: 16-bit logits (~ +-8 nats)
 			q_s = 0;
 			while ($rtoi(sc * (2.0 ** (q_s + 1)) + 0.5) <= 32767 && q_s < 47) q_s = q_s + 1;
 			q_m = $rtoi(sc * (2.0 ** q_s) + 0.5);
@@ -472,13 +471,17 @@ module tb_accel_top;
 				vemit(venc(6'h0C, 3'd0, 4'd3, 4'd0, 4'd1, {6'd1, 2'd2, 3'd2}));    // SETP P3: row, low 1 bit == 1
 			end
 			if (vu_mode == 4) begin
-				vemit({6'h01, 3'd0, 4'd4, 19'd0});                     // LI s4, 0
-				vemit(venc(6'h0A, 3'd0, 4'd2, 4'd3, 4'd4, 11'd0));     // SETC c2, s3, s4   (-128..0)
 				vemit({6'h01, 3'd0, 4'd3, 19'd0});                     // LI s3, 0
+				vemit({6'h01, 3'd0, 4'd4, 19'd8191});                  // LI s4, 8191
+				vemit(venc(6'h0A, 3'd0, 4'd2, 4'd3, 4'd4, 11'd0));     // SETC c2, s3, s4   (0..8191: max - logit)
 				vemit({6'h01, 3'd0, 4'd4, 19'd127});                   // LI s4, 127
 				vemit(venc(6'h0A, 3'd0, 4'd1, 4'd3, 4'd4, 11'd0));     // SETC c1, s3, s4   (0..127)
-				vemit(venc(6'h11, 3'd0, 4'd6, 4'd0, 4'hF, 11'h780));   // VLI v6, -128      (imm15 = {b, x} = 0x7F80)
+				vemit({6'h01, 3'd0, 4'd3, 19'h78000});                 // LI s3, -32768
+				vemit({6'h01, 3'd0, 4'd4, 19'd32767});                 // LI s4, 32767
+				vemit(venc(6'h0A, 3'd0, 4'd3, 4'd3, 4'd4, 11'd0));     // SETC c3, s3, s4   (16-bit logit)
+				vemit(venc(6'h12, 3'd0, 4'd6, 4'd3, 4'd0, 11'd0));     // BCAST v6, s3      (running max)
 				vemit(venc(6'h11, 3'd0, 4'd5, 4'd0, 4'd0, 11'd0));     // VLI v5, 0         (running sum)
+				vemit(venc(6'h11, 3'd0, 4'd4, 4'd0, 4'd0, 11'd177));   // VLI v4, 177       (ln2/256 x 2^16)
 				vemit({6'h01, 3'd0, 4'd10, 19'd1});                    // LI s10, 1         (output base)
 				vemit({6'h01, 3'd0, 4'd11, 19'd1});                    // LI s11, 1         (byte mask)
 			end
@@ -498,7 +501,7 @@ module tb_accel_top;
 				vemit(venc(6'h39, 3'd3, 4'd5, 4'd1, 4'd9, 11'd0));    // [p3] ST8A v1, s9, s5, c0
 			end
 			else if (vu_mode == 4) begin
-				vemit(venc(6'h22, 3'd0, 4'd0, 4'd0, 4'd0, 11'd0));    // CLAMP v0, v0, c0      int8 logit
+				vemit(venc(6'h22, 3'd0, 4'd0, 4'd0, 4'd0, 11'd3));    // CLAMP v0, v0, c3      16-bit logit
 				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd4));    // TAG s1, chan          class number
 				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd0, 4'd1, 11'd0));    // STS v0, s1            logit -> local memory
 				vemit(venc(6'h1B, 3'd0, 4'd6, 4'd6, 4'd0, 11'd0));    // MAX v6, v6, v0        running max
@@ -512,11 +515,20 @@ module tb_accel_top;
 				s_e0_s = np_v;                                        // epilogue 0, once per class
 				vemit(venc(6'h08, 3'd0, 4'd1, 4'd0, 4'd0, 11'd9));    // TAG s1, iter
 				vemit(venc(6'h3B, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));    // LDS v1, s1
-				vemit(venc(6'h19, 3'd0, 4'd1, 4'd1, 4'd6, 11'd0));    // SUB v1, v1, v6        d = logit - max
-				vemit(venc(6'h22, 3'd0, 4'd1, 4'd1, 4'd0, 11'd2));    // CLAMP v1, v1, c2      -128..0
-				vemit(venc(6'h23, 3'd0, 4'd1, 4'd1, 4'd0, 11'd0));    // LUT v1, v1            exp(d), Q15
-				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd1, 4'd1, 11'd0));    // STS v1, s1
-				vemit(venc(6'h18, 3'd0, 4'd5, 4'd5, 4'd1, 11'd0));    // ADD v5, v5, v1        running sum
+				vemit(venc(6'h19, 3'd0, 4'd1, 4'd6, 4'd1, 11'd0));    // SUB v1, v6, v1        m = max - logit
+				vemit(venc(6'h22, 3'd0, 4'd1, 4'd1, 4'd0, 11'd2));    // CLAMP v1, v1, c2      0..8191
+				vemit(venc(6'h1E, 3'd0, 4'd3, 4'd1, 4'd0, 11'd4));    // SHR v3, v1, 4         j = m >> 4
+				vemit(venc(6'h1D, 3'd0, 4'd2, 4'd3, 4'd0, 11'd4));    // SHL v2, v3, 4
+				vemit(venc(6'h19, 3'd0, 4'd2, 4'd1, 4'd2, 11'd0));    // SUB v2, v1, v2        r = m & 15
+				vemit(venc(6'h20, 3'd0, 4'd2, 4'd2, 4'd4, 11'd0));    // MUL v2, v2, v4        r x 177
+				vemit(venc(6'h23, 3'd0, 4'd3, 4'd3, 4'd0, 11'd0));    // LUT v3, v3            t = 2^(-j/16), Q14
+				vemit(venc(6'h20, 3'd0, 4'd2, 4'd3, 4'd2, 11'd0));    // MUL v2, v3, v2
+				vemit(venc(6'h1F, 3'd0, 4'd2, 4'd2, 4'd0, 11'd16));   // SHRR v2, v2, 16
+				vemit(venc(6'h19, 3'd0, 4'd3, 4'd3, 4'd2, 11'd0));    // SUB v3, v3, v2        t x 2^(-r/256)
+				vemit(venc(6'h1E, 3'd0, 4'd2, 4'd1, 4'd0, 11'd8));    // SHR v2, v1, 8
+				vemit(venc(6'h24, 3'd0, 4'd3, 4'd3, 4'd2, 11'd0));    // SHRRV v3, v3, v2      e = 2^(-m/256), Q14
+				vemit(venc(6'h3C, 3'd0, 4'd0, 4'd3, 4'd1, 11'd0));    // STS v3, s1
+				vemit(venc(6'h18, 3'd0, 4'd5, 4'd5, 4'd3, 11'd0));    // ADD v5, v5, v3        running sum
 				s_e1_s = np_v;                                        // epilogue 1, once
 				vemit(venc(6'h33, 3'd0, 4'd2, 4'd5, 4'd0, 11'd0));    // RADD s2, v5
 				vemit(venc(6'h0B, 3'd0, 4'd3, 4'd2, 4'd0, 11'd30));   // RCP s3, s2, 30
@@ -538,7 +550,7 @@ module tb_accel_top;
 				sec_s[2] = s_e0_s; sec_l[2] = s_e1_s - s_e0_s; sec_c[2] = L_F;
 				sec_s[3] = s_e1_s; sec_l[3] = s_e2_s - s_e1_s; sec_c[3] = 1;
 				sec_s[4] = s_e2_s; sec_l[4] = s_e3_s - s_e2_s; sec_c[4] = L_F;
-				n_lut_e  = 256;
+				n_lut_e  = 16;
 			end
 		end
 	endtask
@@ -550,9 +562,24 @@ module tb_accel_top;
 			a  = refo[oidx(f, y, x)];
 			yv = (a < 0) ? $signed(a) * q_mn : $signed(a) * q_m;
 			if (q_s != 0) yv = (yv >>> q_s) + ((yv >>> (q_s - 1)) & 64'sd1);
-			if (yv > 127) yv = 127;
-			if (yv < -128) yv = -128;
+			if (vu_mode == 4) begin                                  // softmax layer: 16-bit logit
+				if (yv > 32767) yv = 32767;
+				if (yv < -32768) yv = -32768;
+			end
+			else begin
+				if (yv > 127) yv = 127;
+				if (yv < -128) yv = -128;
+			end
 			q8 = yv[31:0];
+		end
+	endfunction
+
+	function signed [31:0] shrr32(input signed [31:0] a, input integer n);
+		reg signed [63:0] w;
+		begin
+			w = {{32{a[31]}}, a};
+			if (n != 0) w = (w >>> n) + ((w >>> (n - 1)) & 64'sd1);
+			shrr32 = w[31:0];
 		end
 	endfunction
 
@@ -573,32 +600,34 @@ module tb_accel_top;
 		real fsum, fp, perr, maxerr;
 		begin
 			e0 = obuf_err;
-			m = -128;
+			m = -32768;
 			for (i = 0; i < L_F; i = i + 1) begin
 				lg[i] = q8(i, 0, 0);
 				if (lg[i] > m) m = lg[i];
 			end
 			sum = 0;
 			for (i = 0; i < L_F; i = i + 1) begin
-				d = lg[i] - m;
-				if (d < -128) d = -128;
-				ex[i] = {16'd0, exp_tab[d[7:0]]};
+				d = m - lg[i];                                    // the program's exp: see load_vu
+				if (d > 8191) d = 8191;
+				r = {16'd0, exp_tab[d[7:4]]};
+				r = r - shrr32(r * ((d & 15) * 177), 16);
+				ex[i] = shrr32(r, d >>> 8);
 				sum = sum + ex[i];
 			end
 			q64 = (64'd1 << 30) / {32'd0, sum};
 			if (q64[63:32] != 32'd0) $fatal(1, "softmax reference: reciprocal wider than 32 bits");
 			rr  = q64[31:0];
 			fsum = 0.0;
-			for (i = 0; i < L_F; i = i + 1) fsum = fsum + $exp(lg[i] * SM_STEP);
+			for (i = 0; i < L_F; i = i + 1) fsum = fsum + 2.0 ** ((lg[i] - m) / 256.0);
 			maxerr = 0.0;
 			if (loud != 0) $write("      class:            ");
 			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5d", i);
 			if (loud != 0) $display("");
-			if (loud != 0) $write("      logit (int8):     ");
-			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5d", lg[i]);
+			if (loud != 0) $write("      logit (nats):     ");
+			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5.2f", lg[i] / (256.0 * 1.4426950408889634));
 			if (loud != 0) $display("");
 			if (loud != 0) $write("      softmax (float):  ");
-			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5.3f", $exp(lg[i] * SM_STEP) / fsum);
+			if (loud != 0) for (i = 0; i < L_F; i = i + 1) $write(" %5.3f", (2.0 ** ((lg[i] - m) / 256.0)) / fsum);
 			if (loud != 0) $display("");
 			if (loud != 0) $write("      buffer B (q/128): ");
 			for (i = 0; i < L_F; i = i + 1) begin
@@ -616,7 +645,7 @@ module tb_accel_top;
 					if (obuf_err - e0 <= 5) $display("FAIL softmax class %0d = %0d, expected %0d", i, hv, q);
 				end
 				if (loud != 0) $write(" %5.3f", hv / 128.0);
-				fp  = $exp(lg[i] * SM_STEP) / fsum;
+				fp  = (2.0 ** ((lg[i] - m) / 256.0)) / fsum;
 				perr = hv / 128.0 - fp;
 				if (perr < 0.0) perr = -perr;
 				if (perr > maxerr) maxerr = perr;
@@ -819,8 +848,8 @@ module tb_accel_top;
 		errors = 0; layers = 0; cyc = 0; small_vals = 0; fd = 0; total_cycles = 0; total_ideal = 0;
 		pool = 2'd0; tbl_base = TBL_EB; wr_rdy_r = 1'b1; n_lut_e = 0; wb_n = 0;
 		for (n = 0; n < 6; n = n + 1) begin sec_s[n] = 0; sec_l[n] = 0; sec_c[n] = 0; end
-		for (n = 0; n < 256; n = n + 1)
-			exp_tab[n] = 16'($rtoi(32767.0 * $exp(((n < 128) ? 0 : n - 256) * SM_STEP) + 0.5));
+		for (n = 0; n < 16; n = n + 1)
+			exp_tab[n] = 16'($rtoi(16384.0 * (2.0 ** (-n / 16.0)) + 0.5));
 		s_e0_s = 0; s_e1_s = 0; s_e2_s = 0; s_e3_s = 0;
 		vu_mode = 0; force_mode = -1; obuf_checked = 0; obuf_err = 0; q_m = 1; q_mn = 1; q_s = 0; np_v = 0;
 		s_pro_l = 0; s_body_l = 0; s_body_s = 0;
@@ -967,3 +996,4 @@ module tb_accel_top;
 		$finish;
 	end
 endmodule
+

@@ -15,6 +15,7 @@ module tb_vu_lane;
 	localparam L_CLAMP8 = 4'd9;
 	localparam L_MUL    = 4'd10;
 	localparam L_REQ    = 4'd11;
+	localparam L_SHRRV  = 4'd12;
 
 	reg                clk, rst_n, issue;
 	reg         [3:0]  lop;
@@ -29,8 +30,8 @@ module tb_vu_lane;
 	reg                h1, h2, h2n;
 	reg         [3:0]  o1, o2, o2n;
 	integer            errors, t, i;
-	integer            cnt [0:11];
-	integer            bad [0:11];
+	integer            cnt [0:12];
+	integer            bad [0:12];
 
 	vu_lane dut (
 		.clk(clk), .rst_n(rst_n), .lop(lop), .issue(issue),
@@ -55,6 +56,7 @@ module tb_vu_lane;
 	                                input [4:0] n, input signed [31:0] l, input signed [31:0] h);
 		reg signed [63:0] w;
 		reg signed [31:0] c;
+		reg        [4:0]  k;
 		begin
 			c = (x > l) ? x : l;
 			c = (c < h) ? c : h;
@@ -65,11 +67,12 @@ module tb_vu_lane;
 				L_MIN:    ref_fast = (x < y) ? x : y;
 				L_SHL:    ref_fast = x <<< n;
 				L_SHR:    ref_fast = x >>> n;
-				L_SHRR: begin
+				L_SHRR, L_SHRRV: begin
+					k = (op == L_SHRRV) ? y[4:0] : n;     // SHRRV: per-lane amount from b
 					w = {{32{x[31]}}, x};
-					if (n == 0) ref_fast = x;
+					if (k == 0) ref_fast = x;
 					else begin
-						w = (w >>> n) + ((w >>> (n - 1)) & 64'sd1);
+						w = (w >>> k) + ((w >>> (k - 1)) & 64'sd1);
 						ref_fast = w[31:0];
 					end
 				end
@@ -186,7 +189,7 @@ module tb_vu_lane;
 
 		errors = 0;
 		h1 = 1'b0; h2 = 1'b0; h2n = 1'b0; o1 = 0; o2 = 0; o2n = 0; e1 = 0; e2 = 0; e2n = 0;
-		for (i = 0; i < 12; i = i + 1) begin
+		for (i = 0; i < 13; i = i + 1) begin
 			cnt[i] = 0;
 			bad[i] = 0;
 		end
@@ -212,7 +215,7 @@ module tb_vu_lane;
 		$display("");
 		$display("2) Random operations, issued back to back (fast and 2-cycle ops interleaved):");
 		for (t = 0; t < NRAND; t = t + 1) begin
-			op_r = 4'({$random} % 12);
+			op_r = 4'({$random} % 13);
 			lo_r = rand32(1);
 			hi_r = rand32(1);
 			if (({$random} % 4) != 0 && lo_r > hi_r) begin
@@ -242,6 +245,7 @@ module tb_vu_lane;
 		$display("    CLAMP8  %8d   %6d", cnt[9], bad[9]);
 		$display("    MUL     %8d   %6d", cnt[10], bad[10]);
 		$display("    REQ     %8d   %6d", cnt[11], bad[11]);
+		$display("    SHRRV   %8d   %6d", cnt[12], bad[12]);
 		$display("");
 
 		if (errors != 0) $fatal(1, "FAIL: %0d error(s)", errors);
@@ -249,3 +253,4 @@ module tb_vu_lane;
 		$finish;
 	end
 endmodule
+

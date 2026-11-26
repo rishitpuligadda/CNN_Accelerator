@@ -71,6 +71,7 @@ module layer_controller #(
 	localparam S_BIAS   = 4'd11;
 
 	localparam integer FLIGHT = 2 * N + 8;
+	integer            bk;
 
 
 	reg  [3:0]             state;
@@ -224,8 +225,9 @@ module layer_controller #(
 				end
 
 				S_BIAS: begin
-					if (bcnt != 3'd0)
-						bias[bidx*32 +: 32] <= wgt_rdata;
+					for (bk = 0; bk < N; bk = bk + 1)
+						if (bcnt != 3'd0 && bidx == bk[1:0])
+							bias[bk*32 +: 32] <= wgt_rdata;
 					if (bcnt == 3'd4)
 						state <= S_ISSUE;
 					else

@@ -56,7 +56,7 @@ module result_collector #(
 	reg  [ADDR-1:0]      sel_addr;
 	reg                  sel_en, sel_last;
 	wire                 pop = fin[N-1];
-	integer              jj;
+	integer              jj, qe;
 
 	assign desc_full = (count == QD);
 
@@ -85,11 +85,14 @@ module result_collector #(
 				assign is_last[j] = h_cols[j] && !(|h_cols[N-1:j+1]);
 			end
 
+			integer hr;
 			always @(posedge clk or negedge rst_n) begin
 				if (!rst_n)
 					hold <= {((N-1)*ACC_W){1'b0}};
-				else if (c_valid[j] && row != LASTI[RW-1:0])
-					hold[row*ACC_W +: ACC_W] <= c_col[j*ACC_W +: ACC_W];
+				else
+					for (hr = 0; hr < N-1; hr = hr + 1)       // row 0 .. N-2 (row N-1 completes the packet)
+						if (c_valid[j] && row == hr[RW-1:0])
+							hold[hr*ACC_W +: ACC_W] <= c_col[j*ACC_W +: ACC_W];
 			end
 		end
 	endgenerate
@@ -126,15 +129,17 @@ module result_collector #(
 			pkt_chan  <= 8'd0;
 		end
 		else begin
-			if (desc_push && !desc_full) begin
-				q_addr[wr_ptr]  <= desc_addr;
-				q_lanes[wr_ptr] <= desc_lanes;
-				q_cols[wr_ptr]  <= desc_cols;
-				q_row[wr_ptr]   <= desc_row;
-				q_col[wr_ptr]   <= desc_col;
-				q_chan[wr_ptr]  <= desc_chan;
-				wr_ptr          <= wr_ptr + 1'b1;
-			end
+			for (qe = 0; qe < QD; qe = qe + 1)
+				if (desc_push && !desc_full && wr_ptr == qe[QW-1:0]) begin
+					q_addr[qe]  <= desc_addr;
+					q_lanes[qe] <= desc_lanes;
+					q_cols[qe]  <= desc_cols;
+					q_row[qe]   <= desc_row;
+					q_col[qe]   <= desc_col;
+					q_chan[qe]  <= desc_chan;
+				end
+			if (desc_push && !desc_full)
+				wr_ptr <= wr_ptr + 1'b1;
 			if (pop)
 				rd_ptr <= rd_ptr + 1'b1;
 			if ((desc_push && !desc_full) && !pop)

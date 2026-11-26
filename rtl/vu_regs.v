@@ -46,7 +46,7 @@ module vu_regs #(
     output     [31:0]            hi
 );
 	reg  [LANES*32-1:0] vreg [0:6];
-	reg  [31:0]         sreg [1:15];
+	reg  [31:0]         sreg [0:15];      // s0 reads as 0; slot 0 is never written
 	reg  [15:0]         q_mp [0:3];
 	reg  [15:0]         q_mn [0:3];
 	reg  [5:0]          q_sh [0:3];
@@ -87,7 +87,7 @@ module vu_regs #(
 	always @(posedge clk or negedge rst_n) begin
 		if (!rst_n) begin
 			for (r = 0; r < 7; r = r + 1)  vreg[r] <= {(LANES*32){1'b0}};
-			for (r = 1; r < 16; r = r + 1) sreg[r] <= 32'd0;
+			for (r = 0; r < 16; r = r + 1) sreg[r] <= 32'd0;
 			for (r = 0; r < 4; r = r + 1) begin
 				q_mp[r] <= 16'd0;
 				q_mn[r] <= 16'd0;
@@ -104,15 +104,20 @@ module vu_regs #(
 					else if (vw0_en && vw0_idx == r[2:0] && vw0_lanes[k])
 						vreg[r][k*32 +: 32] <= vw0_data[k*32 +: 32];
 				end
-			if (sw_en && sw_idx != 4'd0) sreg[sw_idx] <= sw_data;
-			if (q_we) begin
-				q_mp[q_widx] <= q_mpos;
-				q_mn[q_widx] <= q_mneg;
-				q_sh[q_widx] <= q_s;
-			end
-			if (c_we) begin
-				c_l[c_widx] <= c_lo;
-				c_h[c_widx] <= c_hi;
+			// writes with a variable index spelled out per element (same logic; avoids false
+			// 'used but has no driver' reports from some Yosys versions' check pass)
+			for (r = 1; r < 16; r = r + 1)
+				if (sw_en && sw_idx == r[3:0]) sreg[r] <= sw_data;
+			for (r = 0; r < 4; r = r + 1) begin
+				if (q_we && q_widx == r[1:0]) begin
+					q_mp[r] <= q_mpos;
+					q_mn[r] <= q_mneg;
+					q_sh[r] <= q_s;
+				end
+				if (c_we && c_widx == r[1:0]) begin
+					c_l[r] <= c_lo;
+					c_h[r] <= c_hi;
+				end
 			end
 		end
 	end
