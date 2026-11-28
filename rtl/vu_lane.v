@@ -3,6 +3,7 @@ module vu_lane (
     input                    rst_n,
     input       [3:0]        lop,
     input                    issue,
+    input                    req8,        // REQ: also saturate the result to int8 (-128..127)
     input  signed [31:0]     a,
     input  signed [31:0]     b,
     input       [4:0]        sh,
@@ -64,7 +65,8 @@ module vu_lane (
 
 	reg  signed [47:0]  p_q;
 	reg         [5:0]   s_q;
-	reg                 req_q, slow_q;
+	reg                 req_q, slow_q, sat8_q;
+	wire signed [31:0]  rsat8 = (rsat < -32'sd128) ? -32'sd128 : ((rsat > 32'sd127) ? 32'sd127 : rsat);
 
 	wire signed [47:0]  pshr  = p_q >>> s_q;
 	wire                prbit = (s_q == 6'd0) ? 1'b0 : p_q[s_q - 6'd1];
@@ -79,6 +81,7 @@ module vu_lane (
 			p_q    <= 48'sd0;
 			s_q    <= 6'd0;
 			req_q  <= 1'b0;
+			sat8_q <= 1'b0;
 			slow_q <= 1'b0;
 			r2     <= 32'sd0;
 			v2     <= 1'b0;
@@ -92,11 +95,11 @@ module vu_lane (
 				p_q   <= prod;
 				s_q   <= s;
 				req_q <= (lop == L_REQ);
+				sat8_q <= (lop == L_REQ) && req8;
 			end
 
 			v2 <= slow_q;
-			if (slow_q) r2 <= req_q ? rsat : p_q[31:0];
+			if (slow_q) r2 <= req_q ? (sat8_q ? rsat8 : rsat) : p_q[31:0];
 		end
 	end
 endmodule
-

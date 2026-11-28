@@ -4,10 +4,10 @@
 // external memory, pulses start once, and checks every layer's int8 output map (watching the vector unit's
 // stores) and the final result written back to external memory, against a reference model of the network.
 module tb_network;
-	localparam EAW    = 16;
+	localparam EAW    = 24;
 	localparam N      = 4;
 	localparam ADDR   = 11;
-	localparam EWORDS = 1 << EAW;
+	localparam EWORDS = 65536;           // the part of the 24-bit address space this test uses
 	localparam IMG_EB = 0;
 	localparam WGT_EB = 4096;
 	localparam TBL_EB = 49152;
@@ -24,6 +24,7 @@ module tb_network;
 	wire [31:0]         rd_resp_data;
 	wire                wr_req_valid, wr_req_ready;
 	wire [EAW-1:0]      wr_req_addr;
+	wire [7:0]          unused_wr_hi = wr_req_addr[23:16];   // this test uses the first 64K words
 	wire [31:0]         wr_req_data;
 
 	reg  [31:0]         ext_mem [0:EWORDS-1];
@@ -51,7 +52,7 @@ module tb_network;
 
 	assign rd_req_ready  = mem_on && rdy_r && (sq_count < 32);
 	assign rd_resp_valid = mem_on && (sq_count != 0) && (q_due[sq_head] <= cyc);
-	assign rd_resp_data  = ext_mem[q_addr[sq_head]];
+	assign rd_resp_data  = ext_mem[q_addr[sq_head][15:0]];
 	assign wr_req_ready  = mem_on && wrdy_r;
 
 	always @(posedge clk) begin
@@ -78,7 +79,7 @@ module tb_network;
 		forever begin
 			@(posedge clk);
 			if (wr_req_valid && wr_req_ready) begin
-				ext_mem[wr_req_addr] = wr_req_data;
+				ext_mem[wr_req_addr[15:0]] = wr_req_data;
 				wb_count = wb_count + 1;
 			end
 		end
@@ -363,22 +364,28 @@ module tb_network;
 			build_program(l);
 			nlut  = (LMODE[l] == 4) ? 16 : 0;
 			words = 1 + LF[l] * SOH[l] * ((SOW[l] + 3) / 4);
+			// header: shape; kernel, pads (top/bottom = pad), flags; weights; output base and counts;
+			// load (the first layer: the whole image, one block); write-back (the last layer: one block)
 			ext_mem[tptr + 0] = {8'(LF[l]), 8'(LC[l]), 8'(LW[l]), 8'(LH[l])};
-			ext_mem[tptr + 1] = {13'd0, (l == nl - 1), (l == nl - 1), (l == 0), 2'd0, ((LMODE[l] == 2) ? 2'd1 : 2'd0),
-			                     3'(LS[l]), 3'(LP[l]), 3'(LKW[l]), 3'(LKH[l])};
-			ext_mem[tptr + 2] = {5'd0, 11'd1, 16'(WADDR[l])};
-			ext_mem[tptr + 3] = {16'(WB_EB), 16'(IMG_EB)};
-			ext_mem[tptr + 4] = {8'd0, 12'(words), 1'b0, 11'd0};
-			ext_mem[tptr + 5] = {15'd0, 9'(nlut), 1'b0, 7'(np)};
-			ext_mem[tptr + 6]  = sect(0, s_pro, 1);
-			ext_mem[tptr + 7]  = sect(s_body, s_e0 - s_body, 0);
-			ext_mem[tptr + 8]  = sect(s_e0, s_e1 - s_e0, LF[l]);
-			ext_mem[tptr + 9]  = sect(s_e1, s_e2 - s_e1, 1);
-			ext_mem[tptr + 10] = sect(s_e2, s_e3 - s_e2, LF[l]);
-			ext_mem[tptr + 11] = sect(0, 0, 0);
-			for (i = 0; i < np; i = i + 1) ext_mem[tptr + 12 + i] = prg[i];
-			for (i = 0; i < nlut / 2; i = i + 1) ext_mem[tptr + 12 + np + i] = {exp_tab[2 * i + 1], exp_tab[2 * i]};
-			tptr = tptr + 12 + np + nlut / 2;
+			ext_mem[tptr + 1] = {7'd0, (l == nl - 1), (l == nl - 1), (l == 0), ((LMODE[l] == 2) ? 2'd1 : 2'd0),
+			                     3'(LS[l]), 3'(LP[l]), 3'(LP[l]), 3'(LP[l]), 4'(LKW[l]), 4'(LKH[l])};
+			ext_mem[tptr + 2] = 32'(WADDR[l]);
+			ext_mem[tptr + 3] = {9'(nlut), 7'(np), 5'd0, 11'd1};
+			ext_mem[tptr + 4] = 32'(IMG_EB);
+			ext_mem[tptr + 5] = {11'd0, 1'b0, 8'd1, 12'(1 + LC[l] * LH[l] * ((LW[l] + 3) / 4))};
+			ext_mem[tptr + 6] = 32'd0;
+			ext_mem[tptr + 7] = 32'(WB_EB);
+			ext_mem[tptr + 8] = {1'b0, 11'd0, 8'd1, 12'(words)};
+			ext_mem[tptr + 9] = 32'd0;
+			ext_mem[tptr + 10] = sect(0, s_pro, 1);
+			ext_mem[tptr + 11] = sect(s_body, s_e0 - s_body, 0);
+			ext_mem[tptr + 12] = sect(s_e0, s_e1 - s_e0, LF[l]);
+			ext_mem[tptr + 13] = sect(s_e1, s_e2 - s_e1, 1);
+			ext_mem[tptr + 14] = sect(s_e2, s_e3 - s_e2, LF[l]);
+			ext_mem[tptr + 15] = sect(0, 0, 0);
+			for (i = 0; i < np; i = i + 1) ext_mem[tptr + 16 + i] = prg[i];
+			for (i = 0; i < nlut / 2; i = i + 1) ext_mem[tptr + 16 + np + i] = {exp_tab[2 * i + 1], exp_tab[2 * i]};
+			tptr = tptr + 16 + np + nlut / 2;
 		end
 	endtask
 
@@ -599,4 +606,3 @@ module tb_network;
 		$finish;
 	end
 endmodule
-

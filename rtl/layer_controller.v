@@ -1,5 +1,5 @@
 module layer_controller #(
-    parameter EAW  = 16,
+    parameter EAW  = 24,
     parameter ADDR = 11,
     parameter N       = 4,
     parameter CREDITS = 8
@@ -12,8 +12,11 @@ module layer_controller #(
     output reg                     img_phase,
     input                          load_img,
 
-    input      [EAW-1:0]           img_ext_base,
-    input      [ADDR:0]            img_words,
+    input      [EAW-1:0]           ld_base,       // input load (S_IMG): ld_nblk blocks of ld_words, ld_stride apart
+    input      [EAW-1:0]           ld_stride,
+    input      [ADDR:0]            ld_words,
+    input      [7:0]               ld_nblk,
+    input                          ld_sram,       // first buffer word: 0 (with the guard word) or 1
     input      [EAW-1:0]           wgt_ext_base,
     input      [10:0]              m,
     input      [6:0]               n_groups,
@@ -21,6 +24,7 @@ module layer_controller #(
     input      [7:0]               out_h,
     input      [7:0]               out_w,
     input      [2:0]               pad,
+    input      [2:0]               pad_t,
     input      [2:0]               stride,
     input  signed [ADDR+2:0]       tile_addr0,
     input      [ADDR+1:0]          row_step,
@@ -30,8 +34,10 @@ module layer_controller #(
 
     output                         dma_start,
     output     [EAW-1:0]           dma_ext_base,
+    output     [EAW-1:0]           dma_ext_stride,
     output     [ADDR-1:0]          dma_sram_base,
     output     [ADDR:0]            dma_nwords,
+    output     [7:0]               dma_nblk,
     input                          dma_done,
 
     output                         feed_start,
@@ -100,16 +106,19 @@ module layer_controller #(
 	wire                   last_group = (g == n_groups - 1'b1);
 	wire                   pref_go    = dbuf && ({1'b0, g} + 8'd1 < {1'b0, n_groups});
 	wire signed [9:0]      pad_s      = $signed({7'd0, pad});
+	wire signed [9:0]      pad_t_s    = $signed({7'd0, pad_t});
 	wire        [10:0]     gw         = m + 11'd4;
 	wire        [1:0]      bidx       = bcnt[1:0] - 2'd1;
 	wire        [ADDR+1:0] x_step     = {{(ADDR-3){1'b0}}, stride, 2'b00};
 
 	assign dma_start     = (state == S_IMG) || (state == S_WLOAD) || (state == S_PREF && pref_go);
-	assign dma_ext_base  = (state == S_IMG) ? img_ext_base : wptr;
-	assign dma_sram_base = (state == S_IMG)   ? {ADDR{1'b0}} :
+	assign dma_ext_base  = (state == S_IMG) ? ld_base : wptr;
+	assign dma_ext_stride = (state == S_IMG) ? ld_stride : {EAW{1'b0}};
+	assign dma_nblk      = (state == S_IMG) ? ld_nblk : 8'd1;
+	assign dma_sram_base = (state == S_IMG)   ? {{(ADDR-1){1'b0}}, ld_sram} :
 	                       (state == S_WLOAD) ? {{(ADDR-10){1'b0}}, half, 9'd0} :
 	                                            {{(ADDR-10){1'b0}}, ~half, 9'd0};
-	assign dma_nwords    = (state == S_IMG) ? img_words : {{(ADDR-10){1'b0}}, gw};
+	assign dma_nwords    = (state == S_IMG) ? ld_words : {{(ADDR-10){1'b0}}, gw};
 
 	assign feed_start = issue;
 	assign wgt_base   = {half, 9'd4};
@@ -208,7 +217,7 @@ module layer_controller #(
 					ow         <= 8'd0;
 					tx         <= {(ADDR+2){1'b0}};
 					row_addr   <= tile_addr0;
-					y0_r       <= -pad_s;
+					y0_r       <= -pad_t_s;
 					o_row_base <= o_grp_base;
 					if (pref_go) begin
 						wptr  <= wptr + {{(EAW-11){1'b0}}, gw};

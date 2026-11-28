@@ -114,11 +114,13 @@ def main(model_dir, chip_path, show_all=False, names=None):
                 first.append(f"image {i} layer {li} ({ci},{y},{x}): chip {got[ci, y, x]} (written {cnt[ci, y, x]}x), "
                              f"golden {exp[ci, y, x]}")
         h, w, c = shapes[-1]
-        wbpos = positions(c, h, w, modes[-1]).reshape(-1)
-        o = s8(r["wb"][wbpos])
+        wbpos = positions(c, h, w, modes[-1])
+        o_full = s8(r["wb"][wbpos])                            # the whole last map as written back
+        exp_full = g[f"map{len(shapes) - 1}"][i].reshape(c, h, w)
+        o = o_full[:, 0, 0]                                     # a classifier's outputs (its map is 1x1)
         chip_out.append(o)
-        if (o != gout[i]).any():
-            out_err += int((o != gout[i]).sum())
+        if (o_full != exp_full).any():
+            out_err += int((o_full != exp_full).sum())
             if len(first) < 5:
                 first.append(f"image {i}: written-back result {list(o)}, golden {list(gout[i])}")
     chip_out = np.array(chip_out)

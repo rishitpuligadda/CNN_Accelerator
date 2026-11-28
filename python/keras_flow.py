@@ -182,7 +182,7 @@ def main(export_path, mnist_path, outdir="../simulation/model", n_rtl=100, n_cal
     print("1) Converting the Keras model to chip layers:")
     try:
         layers, params, (in_c, in_h, in_w), in_div = convert(export)
-        chipnet.check_limits(layers, in_c, in_h, in_w)
+        bands, _ = chipnet.check_limits(layers, in_c, in_h, in_w)
     except ValueError as e:
         sys.exit(f"   the model cannot run on the chip as it is: {e}")
     h, w = in_h, in_w
@@ -191,7 +191,8 @@ def main(export_path, mnist_path, outdir="../simulation/model", n_rtl=100, n_cal
         print(f"   chip layer {li}: {L['kind']} {h}x{w}x{L['cin']} -> {L['cout']} filters {L['kh']}x{L['kw']}, "
               f"stride {L['stride']}, pad {L['pad']}{', ReLU' if L['relu'] else ''}"
               f"{', 2x2 max pool' if L['pool'] else ''}{', softmax' if L['softmax'] else ''} -> stored "
-              f"{sh}x{sw}x{L['cout']} ({chipnet.map_words(L['cout'], sh, sw)} of {chipnet.BUF_WORDS} words)")
+              f"{sh}x{sw}x{L['cout']} ({chipnet.map_words(L['cout'], sh, sw)} words"
+              f"{'' if not bands[li] else f'; in bands of {bands[li]} rows through external memory'})")
         h, w = sh, sw
 
     with np.load(mnist_path, allow_pickle=True) as f:

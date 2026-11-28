@@ -7,15 +7,13 @@
 // It knows no expected values. It writes everything the chip produced to outputs/chip_results.hex;
 // python/check_results.py compares that with the golden model afterwards.
 module tb_model;
-	localparam EAW    = 16;
+	localparam EAW    = 24;
 	localparam N      = 4;
 	localparam ADDR   = 11;
-	localparam EWORDS = 1 << EAW;
-	localparam IMG_EB = 0;
-	localparam TBL_EB = 49152;
-	localparam WB_EB  = 57344;
 
-	`include "model/model_params.vh"
+	`include "model/model_params.vh"      // memory map (IMG_EB, TBL_EB, WB_EB, MEM_WORDS), sizes, probe mapping
+
+	localparam EWORDS = MEM_WORDS;
 
 	reg                 clk, rst_n, start;
 	wire                busy, done, err_valid;
@@ -82,20 +80,44 @@ module tb_model;
 	end
 
 	// ---------------------------------------------------------------- probe: every byte the vector unit stores, per layer
-	reg  [7:0]  hw_map [0:7][0:6143];
-	integer     hw_wr  [0:7][0:6143];
+	// A layer split into bands runs as several table entries; each stores only its band into the buffer
+	// (channel blocks of ent_bw words from word 1). The probe puts every byte where it belongs in the
+	// layer's whole map: word 1 + channel x ent_cp + ent_off + (word inside the block).
+	reg  [7:0]  hw_map [0:NL-1][0:MAXB-1];
+	integer     hw_wr  [0:NL-1][0:MAXB-1];
 
 	initial begin : probe
-		integer i, l;
+		integer i, l, e, bw, a, mw;
 		forever begin
 			@(posedge clk);
 			if (mem_on && dut.st_en) begin
-				l = dut.u_seq.layer_idx;
+				e  = dut.u_seq.layer_idx;
+				l  = ent_layer(e);
+				bw = ent_bw(e);
+				a  = dut.st_addr;
+				mw = (bw == 0) ? a : 1 + ((a - 1) / bw) * ent_cp(e) + ent_off(e) + (a - 1) % bw;
 				for (i = 0; i < N; i = i + 1)
 					if (dut.st_be[i]) begin
-						hw_map[l][dut.st_addr * 4 + i] = dut.st_data[i*8 +: 8];
-						hw_wr[l][dut.st_addr * 4 + i]  = hw_wr[l][dut.st_addr * 4 + i] + 1;
+						hw_map[l][mw * 4 + i] = dut.st_data[i*8 +: 8];
+						hw_wr[l][mw * 4 + i]  = hw_wr[l][mw * 4 + i] + 1;
 					end
+			end
+		end
+	end
+
+	// ---------------------------------------------------------------- cycles per layer (from each table entry's start)
+	integer     lay_cyc [0:NL-1];
+	integer     ent_t0, ent_cur;
+	initial begin : timing
+		integer l;
+		ent_cur = -1; ent_t0 = 0;
+		for (l = 0; l < NL; l = l + 1) lay_cyc[l] = 0;
+		forever begin
+			@(posedge clk);
+			if (mem_on && (dut.seq_layer_start || dut.done)) begin
+				if (ent_cur >= 0) lay_cyc[ent_layer(ent_cur)] = lay_cyc[ent_layer(ent_cur)] + (cyc - ent_t0);
+				ent_cur = dut.done ? -1 : dut.u_seq.layer_idx;
+				ent_t0  = cyc;
 			end
 		end
 	end
@@ -123,12 +145,12 @@ module tb_model;
 		$fdisplay(fd, "// bytes as 'vvc' (value, number of times written: 0, 1, or 2 for twice or more)");
 
 		$display("");
-		$display("Running %0d images on the chip, %0d layers each (one start per image).", NIMG, NL);
+		$display("Running %0d images on the chip, %0d layers each (%0d table entries; one start per image).", NIMG, NL, NE);
 		for (img = 0; img < NIMG; img = img + 1) begin
 			// the host: put the image into memory, clear the result area, start the chip
 			for (i = 0; i < IMG_WORDS; i = i + 1) ext_mem[IMG_EB + i] = images[img * IMG_WORDS + i];
 			for (i = 0; i < WB_WORDS; i = i + 1) ext_mem[WB_EB + i] = 32'hDEADBEEF;
-			for (l = 0; l < NL; l = l + 1) for (i = 0; i < 6144; i = i + 1) hw_wr[l][i] = 0;
+			for (l = 0; l < NL; l = l + 1) for (i = 0; i < MAXB; i = i + 1) hw_wr[l][i] = 0;
 			t0 = cyc;
 			@(negedge clk);
 			start = 1'b1;
@@ -138,7 +160,7 @@ module tb_model;
 			while (!done) begin
 				@(negedge clk);
 				i = i + 1;
-				if (i > 5000000) $fatal(1, "image %0d never finished", img);
+				if (i > 200000000) $fatal(1, "image %0d never finished", img);
 			end
 			if (err_valid) $fatal(1, "image %0d: the chip rejected a layer, err = %b", img, err);
 			repeat (2) @(negedge clk);
@@ -153,6 +175,11 @@ module tb_model;
 					$fdisplay(fd, "%02x%0d", hw_map[l][b], wd);
 				end
 			if (img < 5 || img % 50 == 49) $display("    image %0d: done after %0d cycles", img, cyc - t0);
+			if (img == 0) begin
+				$write("      per layer (from its start to the next layer's start; the first one includes the table fetch):");
+				for (l = 0; l < NL; l = l + 1) $write(" %0d", lay_cyc[l]);
+				$display("");
+			end
 		end
 		$fclose(fd);
 		$display("");

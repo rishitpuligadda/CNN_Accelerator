@@ -80,6 +80,7 @@ module vector_unit #(
 	localparam OP_SLLV  = 6'h0F;
 	localparam OP_SETR  = 6'h14;
 	localparam OP_ST8A  = 6'h39;
+	localparam OP_ST8P  = 6'h3A;     // ST8 at the address unit's pooled address and byte mask (paddr, pbe)
 	localparam OP_LUTW  = 6'h3D;
 	localparam OP_LUT   = 6'h23;
 	localparam OP_SHRRV = 6'h24;
@@ -217,12 +218,12 @@ module vector_unit #(
 
 	reg  [3:0]           lop;
 	reg                  vec_op, slow_op, st_op, reads_a, reads_b, writes_v;
-	reg                  a_imm, a_bcast, b_imm, a_idx, a_sel, cmp_op, pairw, permw, perm_s, ld_op, st8a, a_lut;
+	reg                  a_imm, a_bcast, b_imm, a_idx, a_sel, cmp_op, pairw, permw, perm_s, ld_op, st8a, st8p, a_lut;
 
 	always @* begin
 		lop = L_PASS; vec_op = 1'b0; slow_op = 1'b0; st_op = 1'b0;
 		reads_a = 1'b0; reads_b = 1'b0; writes_v = 1'b0;
-		a_imm = 1'b0; a_bcast = 1'b0; b_imm = 1'b0; a_idx = 1'b0; a_sel = 1'b0; cmp_op = 1'b0; pairw = 1'b0; permw = 1'b0; perm_s = 1'b0; ld_op = 1'b0; st8a = 1'b0; a_lut = 1'b0;
+		a_imm = 1'b0; a_bcast = 1'b0; b_imm = 1'b0; a_idx = 1'b0; a_sel = 1'b0; cmp_op = 1'b0; pairw = 1'b0; permw = 1'b0; perm_s = 1'b0; ld_op = 1'b0; st8a = 1'b0; st8p = 1'b0; a_lut = 1'b0;
 		case (op)
 			OP_MOV:   begin vec_op = 1'b1; lop = L_PASS;  reads_a = 1'b1; writes_v = 1'b1; end
 			OP_VLI:   begin vec_op = 1'b1; lop = L_PASS;  a_imm = 1'b1;   writes_v = 1'b1; end
@@ -241,6 +242,7 @@ module vector_unit #(
 			OP_CLAMP: begin vec_op = 1'b1; lop = L_CLAMP; reads_a = 1'b1; writes_v = 1'b1; end
 			OP_ST8:   begin vec_op = 1'b1; lop = L_CLAMP8; reads_a = 1'b1; st_op = 1'b1; end
 			OP_ST8A:  begin vec_op = 1'b1; lop = L_CLAMP8; reads_a = 1'b1; st_op = 1'b1; st8a = 1'b1; end
+			OP_ST8P:  begin vec_op = 1'b1; lop = L_CLAMP8; reads_a = 1'b1; st_op = 1'b1; st8p = 1'b1; end
 			OP_LUT:   begin vec_op = 1'b1; lop = L_PASS;  a_lut = 1'b1;   reads_a = 1'b1; writes_v = 1'b1; end
 			OP_RMAX:  begin cmp_op = 1'b1; reads_a = 1'b1; end
 			OP_RADD:  begin cmp_op = 1'b1; reads_a = 1'b1; end
@@ -429,8 +431,10 @@ module vector_unit #(
 				assign pair_b = vda[(2*i+1)*32 +: 32];
 			end
 			else begin : NOPAIR
-				assign pair_a = 32'd0;
-				assign pair_b = 32'd0;
+				// MAXP / ADDP with x bit 0 set: lane i repeats pair i - LANES/2 (e.g. 2, 3 = 0, 1), otherwise 0
+				localparam integer PJ = i - LANES / 2;
+				assign pair_a = fx[0] ? vda[(2*PJ)*32 +: 32]   : 32'd0;
+				assign pair_b = fx[0] ? vda[(2*PJ+1)*32 +: 32] : 32'd0;
 			end
 			wire [PB-1:0] psel_imm, psel;
 			if (i * PB + PB <= 11) begin : PIMM
@@ -454,7 +458,7 @@ module vector_unit #(
 			                   pairw   ? pair_b : vdb[i*32 +: 32];
 
 			vu_lane u_lane (
-				.clk(clk), .rst_n(rst_n), .lop(lop), .issue(exec && vec_op),
+				.clk(clk), .rst_n(rst_n), .lop(lop), .issue(exec && vec_op), .req8(fx[4]),
 				.a(a_in), .b(b_in), .sh(fx[4:0]),
 				.mpos(mpos), .mneg(mneg), .s(sh6), .lo(lo), .hi(hi),
 				.r1(r1_all[i*32 +: 32]), .v1(v1_all[i]), .r2(r2_all[i*32 +: 32]), .v2(v2_all[i])
@@ -540,8 +544,8 @@ module vector_unit #(
 			f_wr_q    <= exec && vec_op && !slow_op && writes_v;
 			f_st_q    <= exec && st_op;
 			f_dst_q   <= fd[2:0];
-			f_addr_q  <= st8a ? sdb[ADDR-1:0] : cur_addr;
-			f_be_q    <= (st8a ? sda[LANES-1:0] : cur_be) & wlanes;
+			f_addr_q  <= st8p ? au_paddr[ADDR-1:0] : (st8a ? sdb[ADDR-1:0] : cur_addr);
+			f_be_q    <= (st8p ? au_pbe : (st8a ? sda[LANES-1:0] : cur_be)) & wlanes;
 			f_lanes_q <= wlanes;
 
 			s_wr_q1    <= exec && slow_op;
@@ -749,10 +753,11 @@ module vector_unit #(
 	// Lane k is one 32-bit column. Writes (STS, STS8) use port 0 with a byte mask, reads (LDS, LDS8) port 1;
 	// the read is registered: the address is taken at the end of the LDS cycle, the data is used in the next one.
 	// One instruction per cycle, so a read and a write never hit the memory in the same cycle.
+	// STS / LDS with x bit 0 set take their entry from the address unit (lmidx) instead of a scalar register
 	wire                 lm_we    = exec && (op == OP_STS || op == OP_STS8);
-	wire [LM_AW-1:0]     lm_waddr = (op == OP_STS8) ? sdb[LM_AW+1:2] : sdb[LM_AW-1:0];
+	wire [LM_AW-1:0]     lm_waddr = (op == OP_STS8) ? sdb[LM_AW+1:2] : (fx[0] ? au_lmidx[LM_AW-1:0] : sdb[LM_AW-1:0]);
 	wire                 lm_re    = exec && ld_op;
-	wire [LM_AW-1:0]     lm_raddr = (op == OP_LDS8) ? sda[LM_AW+1:2] : sda[LM_AW-1:0];
+	wire [LM_AW-1:0]     lm_raddr = (op == OP_LDS8) ? sda[LM_AW+1:2] : (fx[0] ? au_lmidx[LM_AW-1:0] : sda[LM_AW-1:0]);
 	wire [LANES*32-1:0]  lm_wdata;
 	wire [LANES*4-1:0]   lm_wmask;
 
@@ -817,4 +822,3 @@ module vector_unit #(
 	endgenerate
 `endif
 endmodule
-

@@ -131,6 +131,15 @@ module tb_vu_pool;
 	function [31:0] ST8A(input [3:0] a, input [3:0] sad, input [3:0] smask, input integer c); ST8A = enc(6'h39, smask, a, sad, c[10:0]); endfunction
 	function [31:0] LDS(input [3:0] d, input [3:0] sa); LDS = enc(6'h3B, d, sa, 4'd0, 11'd0); endfunction
 	function [31:0] STS(input [3:0] a, input [3:0] sb); STS = enc(6'h3C, 4'd0, a, sb, 11'd0); endfunction
+	// the short forms: REQ.sat8 (int8 result), MAXP/ADDP.dup (pairs repeated in the upper lanes),
+	// LDS/STS.lmidx (entry from the address unit), ST8P (store at paddr with pbe)
+	function [31:0] REQ8(input [3:0] d, input [3:0] a, input integer q); REQ8 = enc(6'h21, d, a, 4'd0, 11'h10 | q[10:0]); endfunction
+	function [31:0] MAXPD(input [3:0] d, input [3:0] a); MAXPD = enc(6'h30, d, a, 4'd0, 11'd1); endfunction
+	function [31:0] ADDPD(input [3:0] d, input [3:0] a); ADDPD = enc(6'h31, d, a, 4'd0, 11'd1); endfunction
+	function [31:0] LDSL(input [3:0] d); LDSL = enc(6'h3B, d, 4'd0, 4'd0, 11'd1); endfunction
+	function [31:0] STSL(input [3:0] a); STSL = enc(6'h3C, 4'd0, a, 4'd0, 11'd1); endfunction
+	function [31:0] ST8P(input [3:0] a, input integer c); ST8P = enc(6'h3A, 4'd0, a, 4'd0, c[10:0]); endfunction
+	integer short_prog;
 
 	localparam T_ROW = 2, T_PADDR = 6, T_PBE = 7, T_LMIDX = 8;
 	localparam OP_LOWEQ = 2, OP_LOWNE = 3;
@@ -160,6 +169,19 @@ module tb_vu_pool;
 			emit(SETP(2, T_ROW, OP_LOWEQ, 1, 0));
 			emit(SETP(3, T_ROW, OP_LOWEQ, 1, 1));
 			n_pro = np;
+			if (short_prog != 0) begin                         // 6 (max) or 7 (average) instructions
+				emit(REQ8(0, 7, 0));
+				if (avg != 0) emit(ADDPD(1, 0)); else emit(MAXPD(1, 0));
+				emitp(3'd2, STSL(1));
+				emitp(3'd3, LDSL(2));
+				if (avg != 0) begin
+					emitp(3'd3, ADD(1, 1, 2));
+					emitp(3'd3, SHRR(1, 1, 2));
+				end
+				else emitp(3'd3, MAX(1, 1, 2));
+				emitp(3'd3, ST8P(1, 0));
+			end
+			else begin
 			emit(REQ(0, 7, 0)); emit(CLAMP(0, 0, 0));
 			if (avg != 0) emit(ADDP(1, 0)); else emit(MAXP(1, 0));
 			emit(TAG(6, T_LMIDX));
@@ -173,6 +195,7 @@ module tb_vu_pool;
 			emit(PERM(1, 1, 8'b01_00_01_00));
 			emit(TAG(9, T_PADDR)); emit(TAG(5, T_PBE));
 			emitp(3'd3, ST8A(1, 9, 5, 0));
+			end
 		end
 	endtask
 
@@ -390,7 +413,7 @@ module tb_vu_pool;
 			$dumpfile("waveforms/vu_pool.vcd");
 			$dumpvars(0, tb_vu_pool);
 		end
-		errors = 0; layers = 0; pkts_total = 0; show = 0; cyc_total = 0; bad_st = 0;
+		short_prog = 0; errors = 0; layers = 0; pkts_total = 0; show = 0; cyc_total = 0; bad_st = 0;
 		p_idx = 0; n_pkts = 0; avail_pct = 100; avail = 1'b1;
 		pm_we = 1'b0; pm_waddr = 0; pm_wdata = 0;
 		pro_start = 0; pro_len = 0; body_start = 0; body_len = 0; epi_start = 0; epi_len = 0;
@@ -417,6 +440,23 @@ module tb_vu_pool;
 		run_layer(7, 13, 5, 2, 0, 60);
 		run_layer(9, 61, 4, 2, 0, 100);
 		run_layer(64, 64, 2, 2, 0, 100);
+
+		$display("");
+		$display("1b) The same, with the short program the compiler uses (6 instructions per packet instead of 11):");
+		$display("    REQ.sat8, MAXP.dup, [even row] STS.lmidx, [odd row] LDS.lmidx, MAX, ST8P");
+		short_prog = 1;
+		show = 1;
+		run_layer(6, 10, 2, 2, 0, 100);
+		show = 0;
+		run_layer(28, 28, 8, 2, 0, 100);
+		run_layer(3, 3, 1, 2, 0, 100);
+		run_layer(7, 13, 5, 2, 0, 60);
+		run_layer(9, 61, 4, 2, 0, 100);
+		run_layer(14, 14, 8, 2, 1, 100);                     // average pooling (7 instructions)
+		run_layer(5, 9, 3, 2, 1, 70);
+		for (t = 0; t < 10; t = t + 1)
+			run_layer(2 + {$random} % 63, 2 + {$random} % 63, 1 + {$random} % 16, 2, t % 2, 40 + {$random} % 61);
+		short_prog = 0;
 
 		$display("");
 		$display("2) 4x4 max pooling, stride 4:");

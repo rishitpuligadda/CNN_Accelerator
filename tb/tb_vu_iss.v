@@ -197,6 +197,9 @@ module tb_vu_iss;
 		reg [63:0] q64;
 		reg [LANES-1:0] wl;
 		reg [W-1:0] old;
+		/* verilator lint_off UNUSEDSIGNAL */
+		reg [31:0] lmi, lmb;           // address-unit values (only their low bits are used)
+		/* verilator lint_on UNUSEDSIGNAL */
 		integer i;
 		begin
 			pr = w[25:23];
@@ -240,7 +243,8 @@ module tb_vu_iss;
 				endcase
 				6'h3B: if (d[2:0] != 3'd7) begin
 					old = iv[d[2:0]];
-					vr  = lm[is[a][7:0]];
+					lmi = tagv(4'd8);
+					vr  = lm[x[0] ? lmi[7:0] : is[a][7:0]];                // x bit 0: entry = lmidx
 					for (i = 0; i < LANES; i = i + 1) if (!wl[i]) vr[i*32 +: 32] = old[i*32 +: 32];
 					iv[d[2:0]] = vr;
 				end
@@ -252,21 +256,26 @@ module tb_vu_iss;
 					end
 					iv[d[2:0]] = vr;
 				end
-				6'h3C: for (i = 0; i < LANES; i = i + 1) if (wl[i]) lm[is[b][7:0]][i*32 +: 32] = va[i*32 +: 32];
+				6'h3C: begin
+					lmi = tagv(4'd8);
+					for (i = 0; i < LANES; i = i + 1) if (wl[i]) lm[x[0] ? lmi[7:0] : is[b][7:0]][i*32 +: 32] = va[i*32 +: 32];
+				end
 				6'h3F: for (i = 0; i < LANES; i = i + 1)
 					if (wl[i]) begin
 						la = va[i*32 +: 32];
 						la = (la < -128) ? -32'sd128 : ((la > 127) ? 32'sd127 : la);
 						lm[is[b][9:2]][i*32 + is[b][1:0]*8 +: 8] = la[7:0];
 					end
-				6'h39: begin
+				6'h39, 6'h3A: begin                                        // ST8A; ST8P: address unit's paddr, pbe
 					for (i = 0; i < LANES; i = i + 1) begin
 						c = f_clamp(va[i*32 +: 32], icl[x[1:0]], ich[x[1:0]]);
 						c = (c < -128) ? -32'sd128 : ((c > 127) ? 32'sd127 : c);
 						sb[i*8 +: 8] = c[7:0];
 					end
-					e_addr[e_tail % QMAX] = is[b][ADDR-1:0];
-					e_be[e_tail % QMAX]   = is[d][LANES-1:0] & wl;
+					lmi = tagv(4'd6);
+					lmb = tagv(4'd7);
+					e_addr[e_tail % QMAX] = (op == 6'h3A) ? lmi[ADDR-1:0] : is[b][ADDR-1:0];
+					e_be[e_tail % QMAX]   = ((op == 6'h3A) ? lmb[LANES-1:0] : is[d][LANES-1:0]) & wl;
 					e_data[e_tail % QMAX] = sb;
 					e_tail = e_tail + 1;
 				end
@@ -302,6 +311,11 @@ module tb_vu_iss;
 									lb = va[(2*i+1)*32 +: 32];
 									c  = (op == 6'h30) ? ((la > lb) ? la : lb) : la + lb;
 								end
+								else if (x[0]) begin                                // upper lanes repeat the pairs
+									la = va[(2*(i-LANES/2))*32 +: 32];
+									lb = va[(2*(i-LANES/2)+1)*32 +: 32];
+									c  = (op == 6'h30) ? ((la > lb) ? la : lb) : la + lb;
+								end
 								else c = 0;
 							end
 							6'h18: c = la + lb;
@@ -313,7 +327,10 @@ module tb_vu_iss;
 							6'h1E: c = la >>> x[4:0];
 							6'h1F: c = f_shrr(la, x[4:0]);
 							6'h20: c = la * $signed(lb[15:0]);
-							6'h21: c = f_req(la, iqp[x[1:0]], iqn[x[1:0]], iqs[x[1:0]]);
+							6'h21: begin
+								c = f_req(la, iqp[x[1:0]], iqn[x[1:0]], iqs[x[1:0]]);
+								if (x[4]) c = (c < -128) ? -32'sd128 : ((c > 127) ? 32'sd127 : c);   // REQ .sat8
+							end
 							default: c = f_clamp(la, icl[x[1:0]], ich[x[1:0]]);
 						endcase
 						vr[i*32 +: 32] = c;
@@ -388,7 +405,7 @@ module tb_vu_iss;
 		reg [10:0] x;
 		begin
 			d = 4'($random); a = 4'($random); b = 4'($random); x = 11'($random);
-			k = (must_store != 0) ? 21 : {$random} % 62;
+			k = (must_store != 0) ? 21 : {$random} % 64;
 			case (k)
 				0:  op = 6'h01;  1: op = 6'h02;  2: op = 6'h03;  3: op = 6'h08;
 				4:  op = 6'h09;  5: op = 6'h0A;  6: op = 6'h10;  7: op = 6'h11;
@@ -406,7 +423,7 @@ module tb_vu_iss;
 				46: op = 6'h39; 47: op = 6'h3B; 48: op = 6'h3C; 49: op = 6'h3E;
 				50: op = 6'h3F; 51: op = 6'h3B; 52: op = 6'h3C; 53: op = 6'h08;
 				54: op = 6'h32; 55: op = 6'h33; 56: op = 6'h23; 57: op = 6'h23;
-				58: op = 6'h3D; 59: op = 6'h0B; default: op = 6'h24;
+				58: op = 6'h3D; 59: op = 6'h0B; 60, 61: op = 6'h24; default: op = 6'h3A;
 			endcase
 			if (op == 6'h09 && x[5:0] > 6'd47) x[5:0] = x[5:0] - 6'd16;
 			if (op == 6'h08 && ({$random} % 2) == 1) x[3:0] = 4'(6 + {$random} % 4);
@@ -709,8 +726,8 @@ module tb_vu_iss;
 		$display("    MAXP %0d  ADDP %0d  PERM %0d  PERMS %0d", op_hist[6'h30], op_hist[6'h31], op_hist[6'h34], op_hist[6'h35]);
 		$display("    RMAX %0d  RADD %0d  LUT %0d  LUTW %0d  RCP %0d  SHRRV %0d",
 		         op_hist[6'h32], op_hist[6'h33], op_hist[6'h23], op_hist[6'h3D], op_hist[6'h0B], op_hist[6'h24]);
-		$display("    MULS %0d  SLLV %0d  SETR %0d  ST8A %0d  LDS %0d  STS %0d  LDS8 %0d  STS8 %0d",
-		         op_hist[6'h0E], op_hist[6'h0F], op_hist[6'h14], op_hist[6'h39], op_hist[6'h3B], op_hist[6'h3C],
+		$display("    MULS %0d  SLLV %0d  SETR %0d  ST8A %0d  ST8P %0d  LDS %0d  STS %0d  LDS8 %0d  STS8 %0d",
+		         op_hist[6'h0E], op_hist[6'h0F], op_hist[6'h14], op_hist[6'h39], op_hist[6'h3A], op_hist[6'h3B], op_hist[6'h3C],
 		         op_hist[6'h3E], op_hist[6'h3F]);
 		$display("    (half of all instructions carry a predicate: 20%% lane mask, 30%% packet predicates P2-P7)");
 		$display("  %0d instructions executed in %0d cycles (the difference is interlock stalls and waiting for packets)",

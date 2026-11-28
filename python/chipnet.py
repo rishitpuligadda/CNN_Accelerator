@@ -35,23 +35,53 @@ def map_words(c, h, w):
 
 
 BUF_WORDS = 1536
+K_MAX = 11                 # largest kernel (height and width)
+DIM_MAX = 255              # a map's width, and the rows of one band, are 8-bit on the chip
+
+
+def band_rows_in(L, rows_out, h):
+    """Input rows a band of rows_out stored output rows needs (at most; less where it touches the map's edge)."""
+    conv_rows = rows_out << (1 if L["pool"] else 0)
+    return min((conv_rows - 1) * L["stride"] + L["kh"], h + 2 * L["pad"])
+
+
+def plan_band(L, c, h, w):
+    """Stored output rows per band for this layer: 0 = the whole layer at once (input and output both fit a
+    feature buffer), else the largest band that fits. Raises ValueError when not even one row fits."""
+    oh, ow, sh, sw = out_shape(L, h, w)
+    if map_words(c, h, w) <= BUF_WORDS and map_words(L["cout"], sh, sw) <= BUF_WORDS and h <= DIM_MAX and sh <= DIM_MAX:
+        return 0
+    best = 0
+    for r in range(1, min(sh, DIM_MAX) + 1):
+        rin = band_rows_in(L, r, h)
+        if rin > DIM_MAX or 1 + c * rin * ((w + 3) // 4) > BUF_WORDS or 1 + L["cout"] * r * ((sw + 3) // 4) > BUF_WORDS:
+            break
+        best = r
+    if best == 0:
+        raise ValueError(f"not even one output row of this layer fits the chip: its input rows ({c} channels x "
+                         f"{w} wide) or output rows ({L['cout']} channels x {sw} wide) are too large for a "
+                         f"{BUF_WORDS}-word feature buffer (fewer channels or a narrower map)")
+    return best
 
 
 def check_limits(layers, in_c, in_h, in_w):
-    """Raise ValueError with a readable reason for the first rule a layer breaks."""
+    """Raise ValueError with a readable reason for the first rule a layer breaks. Returns, per layer, the
+    stored output rows per band (0 = not split into bands) and the final shape."""
     h, w, c = in_h, in_w, in_c
-    if map_words(c, h, w) > BUF_WORDS:
-        raise ValueError(f"input image {h}x{w}x{c} needs {map_words(c, h, w)} words, a feature buffer holds {BUF_WORDS}")
+    if w > DIM_MAX:
+        raise ValueError(f"input image {h}x{w}x{c}: at most {DIM_MAX} pixels wide")
+    bands = []
     for i, L in enumerate(layers):
         name = f"layer {i} ({L['kind']} {L['cin']}->{L['cout']}, {L['kh']}x{L['kw']}, stride {L['stride']}, pad {L['pad']})"
         if L["cin"] != c:
             raise ValueError(f"{name}: expects {L['cin']} input channels, gets {c}")
-        if not (1 <= L["kh"] <= 7 and 1 <= L["kw"] <= 7):
-            raise ValueError(f"{name}: kernels are at most 7x7 (an FC layer's input map must be at most 7x7)")
+        if not (1 <= L["kh"] <= K_MAX and 1 <= L["kw"] <= K_MAX):
+            raise ValueError(f"{name}: kernels are at most {K_MAX}x{K_MAX} (an FC layer's input map must be at most "
+                             f"{K_MAX}x{K_MAX})")
         if not 1 <= L["stride"] <= 4:
             raise ValueError(f"{name}: stride must be 1..4")
-        if not (0 <= L["pad"] <= 3 and L["pad"] < min(L["kh"], L["kw"])):
-            raise ValueError(f"{name}: padding must be 0..3 and smaller than the kernel")
+        if not (0 <= L["pad"] <= 7 and L["pad"] < min(L["kh"], L["kw"])):
+            raise ValueError(f"{name}: padding must be 0..7 and smaller than the kernel")
         if L["cin"] * L["kh"] * L["kw"] > 1020:
             raise ValueError(f"{name}: channels x kernel = {L['cin'] * L['kh'] * L['kw']} weights per filter, at most 1020")
         if L["cout"] > 255:
@@ -63,13 +93,19 @@ def check_limits(layers, in_c, in_h, in_w):
             raise ValueError(f"{name}: 2x2 pooling needs an output of at least 2x2, gets {oh}x{ow}")
         if L["pool"] and ow > 128:
             raise ValueError(f"{name}: pooling needs an output at most 128 wide")
-        if map_words(L["cout"], sh, sw) > BUF_WORDS:
-            raise ValueError(f"{name}: its stored output {sh}x{sw}x{L['cout']} needs {map_words(L['cout'], sh, sw)} words, "
-                             f"a feature buffer holds {BUF_WORDS} (fewer filters, more pooling, or a smaller input)")
+        if ow > DIM_MAX:
+            raise ValueError(f"{name}: its output is {ow} wide, at most {DIM_MAX}")
         if L["softmax"] and (i != len(layers) - 1 or sh != 1 or sw != 1):
             raise ValueError(f"{name}: softmax only on the last layer, with a 1x1 output")
+        try:
+            r = plan_band(L, c, h, w)
+        except ValueError as e:
+            raise ValueError(f"{name}: {e}")
+        if r and L["softmax"]:
+            raise ValueError(f"{name}: a softmax layer must fit the chip whole")
+        bands.append(r)
         h, w, c = sh, sw, L["cout"]
-    return h, w, c
+    return bands, (h, w, c)
 
 
 # ---------------------------------------------------------------- arithmetic (NCHW)
@@ -91,8 +127,7 @@ def pool2(a):
     return a[:, :, :h // 2 * 2, :w // 2 * 2].reshape(n, c, h // 2, 2, w // 2, 2).max(axis=(3, 5))
 
 
-def float_forward(layers, params, x):
-    """Float network in chip order. Returns the logits and every layer's output before pooling (for calibration)."""
+def _forward(layers, params, x):
     acts = []
     for L, (w, b) in zip(layers, params):
         cols, oh, ow = im2col(x, L["kh"], L["kw"], L["stride"], L["pad"])
@@ -101,6 +136,17 @@ def float_forward(layers, params, x):
         acts.append(a)
         x = pool2(a) if L["pool"] else a
     return x.reshape(x.shape[0], -1), acts
+
+
+def float_forward(layers, params, x, batch=32):
+    """Float network in chip order, a batch of images at a time (so large maps do not need gigabytes).
+    Returns the logits and, per layer, the largest |output| before pooling (what calibration needs)."""
+    logits, amax = [], [0.0] * len(layers)
+    for i in range(0, len(x), batch):
+        lg, acts = _forward(layers, params, x[i:i + batch])
+        logits.append(lg)
+        amax = [max(m, float(np.abs(a).max())) for m, a in zip(amax, acts)]
+    return np.concatenate(logits), amax
 
 
 # ---------------------------------------------------------------- quantization
@@ -114,16 +160,16 @@ def quantize_factor(f):
 
 def quantize(layers, params, xcal, s_in=1.0 / 127.0):
     """Per-layer int8 weights (symmetric, per tensor), int32 biases, M/S; output scales from calibration images."""
-    _, acts = float_forward(layers, params, xcal)
+    _, amax = float_forward(layers, params, xcal)
     q = []
-    for L, (w, b), a in zip(layers, params, acts):
+    for L, (w, b), a in zip(layers, params, amax):
         s_w = float(np.abs(w).max()) / 127.0 or 1.0
         wq = np.clip(np.round(w / s_w), -127, 127).astype(np.int64)
         bq = np.round(b / (s_in * s_w)).astype(np.int64)
         if L["softmax"]:
             s_out = 1.0 / (LOGIT_FRAC * np.log2(np.e))   # logits in base-2 units, 8 fraction bits (16-bit)
         else:
-            s_out = float(np.abs(a).max()) / 127.0 or 1.0
+            s_out = a / 127.0 or 1.0
         m, s = quantize_factor(s_in * s_w / s_out)
         if m < 1:
             m = 1
@@ -197,4 +243,3 @@ def golden(layers, q, table, xi):
         out = np.clip((p >> 23) + ((p >> 22) & 1), 0, 127)
         maps[-1] = out.reshape(-1, 1, 1)                 # the last layer stores the probabilities
     return maps, out
-

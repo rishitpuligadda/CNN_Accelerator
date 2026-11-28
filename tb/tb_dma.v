@@ -11,6 +11,8 @@ module tb_dma;
 	reg  [EAW-1:0] ext_base;
 	reg  [SAW-1:0] sram_base;
 	reg  [SAW:0]   nwords;
+	reg  [EAW-1:0] ext_stride;
+	reg  [7:0]     nblk;
 	wire           busy, done;
 	wire           rd_req_valid, rd_req_ready, rd_resp_valid, rd_resp_ready;
 	wire [EAW-1:0] rd_req_addr;
@@ -43,7 +45,7 @@ module tb_dma;
 
 	dma #(.EAW(EAW), .SAW(SAW)) dut (
 		.clk(clk), .rst_n(rst_n),
-		.start(start), .ext_base(ext_base), .sram_base(sram_base), .nwords(nwords),
+		.start(start), .ext_base(ext_base), .ext_stride(ext_stride), .sram_base(sram_base), .nwords(nwords), .nblk(nblk),
 		.busy(busy), .done(done),
 		.rd_req_valid(rd_req_valid), .rd_req_ready(rd_req_ready), .rd_req_addr(rd_req_addr),
 		.rd_resp_valid(rd_resp_valid), .rd_resp_data(rd_resp_data), .rd_resp_ready(rd_resp_ready),
@@ -161,6 +163,49 @@ module tb_dma;
 		end
 	endtask
 
+	// nb blocks of nw words, block k from ext eb + k * st, landing one after another from sram sb on
+	task run2d(input integer eb, input integer st, input integer nb, input integer sb, input integer nw);
+		integer i, k, r0, s0;
+		begin
+			if (eb < 0 || eb + (nb - 1) * st + nw > EWORDS || sb < 0 || sb + nb * nw > DEPTH || nb < 1 || nb > 255)
+				$fatal(1, "run2d: argument out of range");
+			r0 = reqs;
+			s0 = resps;
+			@(negedge clk);
+			start      = 1'b1;
+			ext_base   = eb[EAW-1:0];
+			ext_stride = st[EAW-1:0];
+			nblk       = nb[7:0];
+			sram_base  = sb[SAW-1:0];
+			nwords     = nw[SAW:0];
+			@(negedge clk);
+			start      = 1'b0;
+			lat        = 1;
+			while (!done) begin
+				@(negedge clk);
+				lat = lat + 1;
+				if (lat > 50 * DEPTH) $fatal(1, "run2d: done never arrived");
+			end
+			nblk = 8'd1; ext_stride = 0;
+			checks = checks + 2;
+			if (reqs - r0 != nb * nw || resps - s0 != nb * nw) begin
+				errors = errors + 1;
+				$display("FAIL: %0d words requested, %0d responses, expected %0d", reqs - r0, resps - s0, nb * nw);
+			end
+			if (exact && lat != nb * nw + 3) begin
+				errors = errors + 1;
+				$display("FAIL latency for %0d x %0d words: %0d cycles, expected %0d", nb, nw, lat, nb * nw + 3);
+			end
+			if (!quiet)
+				$display("  T%0d: %0d blocks of %0d words, ext %0d + k x %0d -> sram[%0d..%0d], %0d cycles",
+				         accepted + 1, nb, nw, eb, st, sb, sb + nb * nw - 1, lat);
+			for (k = 0; k < nb; k = k + 1)
+				for (i = 0; i < nw; i = i + 1)
+					model[sb + k * nw + i] = ext_mem[eb + k * st + i];
+			accepted = accepted + 1;
+		end
+	endtask
+
 	task readback;
 		begin
 			rb_err = errors;
@@ -206,7 +251,7 @@ module tb_dma;
 		cyc = 0; trace = 1'b0; quiet = 1'b0; exact = 1'b0;
 		q_head = 0; q_tail = 0; q_count = 0;
 		lat_min = 1; lat_max = 1; rdy_pct = 100; rdy_r = 1'b1;
-		start = 1'b0; ext_base = 0; sram_base = 0; nwords = 0;
+		start = 1'b0; ext_base = 0; sram_base = 0; nwords = 0; ext_stride = 0; nblk = 8'd1;
 		rb_en0 = 1'b0; rb_en1 = 1'b0; rb_addr0 = 0; rb_addr1 = 0;
 		for (a = 0; a < EWORDS; a = a + 1) ext_mem[a] = $random;
 		for (a = 0; a < QD; a = a + 1) begin
@@ -307,10 +352,22 @@ module tb_dma;
 		$display("  ext[0064..0068] -> sram[200..204], then immediately ext[0384..0388] -> sram[205..209]");
 		readback;
 
+		$display("");
+		$display("8) Blocks (a band of rows from every channel of a map): nblk blocks of nwords words, ext_stride apart:");
+		source(1, 1, 100);
+		run2d(1000, 100, 3, 1, 20);           // 3 channels x 20 words, channel pitch 100
+		run2d(5000, 7, 8, 100, 7);            // stride = block length: one contiguous copy
+		run2d(9000, 500, 1, 400, 33);         // a single block
+		run2d(2000, 200, 255, 0, 6);          // 255 channels
+		source(1, 8, 60);
+		for (n = 0; n < 12; n = n + 1)
+			run2d({$random} % 20000, 1 + {$random} % 1500, 1 + {$random} % 40, {$random} % 400, 1 + {$random} % 28);
+		readback;
+
 		repeat (3) @(negedge clk);
 		checks = checks + 2;
 		$display("");
-		$display("8) Totals: %0d done pulses for %0d accepted transfers; %0d requests, %0d responses, %0d SRAM writes",
+		$display("9) Totals: %0d done pulses for %0d accepted transfers; %0d requests, %0d responses, %0d SRAM writes",
 		         dones, accepted, reqs, resps, writes);
 		if (dones != accepted) begin
 			errors = errors + 1;

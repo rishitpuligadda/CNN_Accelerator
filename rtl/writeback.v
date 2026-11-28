@@ -1,5 +1,7 @@
+// Copies nblk blocks of nwords words from the output buffer (contiguous from src on) to external memory;
+// block k goes to ext_base + k * ext_stride.
 module writeback #(
-    parameter EAW  = 16,
+    parameter EAW  = 24,
     parameter ADDR = 11
 ) (
     input                      clk,
@@ -8,7 +10,9 @@ module writeback #(
     input                      start,
     input      [ADDR-1:0]      src,
     input      [ADDR:0]        nwords,
+    input      [7:0]           nblk,
     input      [EAW-1:0]       ext_base,
+    input      [EAW-1:0]       ext_stride,
     output reg                 done,
     output                     busy,
 
@@ -29,14 +33,17 @@ module writeback #(
 	localparam S_WR   = 2'd3;
 
 	reg  [1:0]       state;
-	reg  [ADDR:0]    i;
+	reg  [ADDR:0]    i;                // buffer word (from src)
+	reg  [ADDR:0]    j;                // word inside the block
+	reg  [7:0]       k;                // block
+	reg  [EAW-1:0]   blk;              // the block's first external address
 	reg  [31:0]      data_q;
 
 	assign busy         = (state != S_IDLE);
 	assign buf_en       = (state == S_RD);
 	assign buf_addr     = src + i[ADDR-1:0];
 	assign wr_req_valid = (state == S_WR);
-	assign wr_req_addr  = ext_base + {{(EAW-ADDR-1){1'b0}}, i};
+	assign wr_req_addr  = blk + {{(EAW-ADDR-1){1'b0}}, j};
 	assign wr_req_data  = data_q;
 
 	// One word at a time: read the buffer (the address is taken at the end of S_RD), capture the data at the
@@ -45,6 +52,9 @@ module writeback #(
 		if (!rst_n) begin
 			state  <= S_IDLE;
 			i      <= {(ADDR+1){1'b0}};
+			j      <= {(ADDR+1){1'b0}};
+			k      <= 8'd0;
+			blk    <= {EAW{1'b0}};
 			data_q <= 32'd0;
 			done   <= 1'b0;
 		end
@@ -52,10 +62,13 @@ module writeback #(
 			done <= 1'b0;
 			case (state)
 				S_IDLE: begin
-					i <= {(ADDR+1){1'b0}};
+					i   <= {(ADDR+1){1'b0}};
+					j   <= {(ADDR+1){1'b0}};
+					k   <= 8'd0;
+					blk <= ext_base;
 					if (start) begin
-						if (nwords == 0) done  <= 1'b1;
-						else             state <= S_RD;
+						if (nwords == 0 || nblk == 8'd0) done  <= 1'b1;
+						else                             state <= S_RD;
 					end
 				end
 				S_RD:  state <= S_CAP;
@@ -65,13 +78,20 @@ module writeback #(
 				end
 				S_WR: begin
 					if (wr_req_ready) begin
-						if (i + 1'b1 == nwords) begin
-							done  <= 1'b1;
-							state <= S_IDLE;
+						i <= i + 1'b1;
+						if (j + 1'b1 != nwords) begin
+							j     <= j + 1'b1;
+							state <= S_RD;
+						end
+						else if (k + 8'd1 != nblk) begin                // next block
+							j     <= {(ADDR+1){1'b0}};
+							k     <= k + 8'd1;
+							blk   <= blk + ext_stride;
+							state <= S_RD;
 						end
 						else begin
-							i     <= i + 1'b1;
-							state <= S_RD;
+							done  <= 1'b1;
+							state <= S_IDLE;
 						end
 					end
 				end

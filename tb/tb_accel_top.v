@@ -1,24 +1,26 @@
 `timescale 1ns/1ps
 
 module tb_accel_top;
-	localparam EAW    = 16;
+	localparam EAW    = 24;
 	localparam N      = 4;
 	localparam ADDR   = 11;
-	localparam EWORDS = 1 << EAW;
+	localparam EWORDS = 65536;            // the part of the 24-bit address space this test uses
 	localparam IMG_EB = 0;
 	localparam WGT_EB = 16384;
 	localparam TBL_EB = 49152;            // layer table
 	localparam WB_EB  = 57344;            // the chip writes its result here
 	localparam QMAX   = 65536;
 	localparam SQ     = 32;
-	localparam KQ     = 49;
+	localparam KQ     = 121;              // kernels up to 11 x 11
 
 	reg                     clk, rst_n, start;
 	wire                    busy, done, err_valid;
 	wire [6:0]              err;
 	reg  [EAW-1:0]          img_ext_base, wgt_ext_base;
 	reg  [7:0]              in_h, in_w, in_c, n_filt;
-	reg  [2:0]              k_h, k_w, pad, stride;
+	reg  [3:0]              k_h, k_w;
+	reg  [2:0]              pad, stride;
+	integer                 L_IW;         // the input image's words (guard word + planar rows)
 	reg  [ADDR-1:0]         out_base;
 
 	wire                    rd_req_valid, rd_req_ready, rd_resp_valid, rd_resp_ready;
@@ -40,6 +42,7 @@ module tb_accel_top;
 	reg  [EAW-1:0]          tbl_base;
 	wire                    wr_req_valid, wr_req_ready;
 	wire [EAW-1:0]          wr_req_addr;
+	wire [7:0]              unused_wr_hi = wr_req_addr[23:16];   // this test uses the first 64K words
 	wire [31:0]             wr_req_data;
 	reg                     wr_rdy_r;
 	integer                 wb_count;
@@ -69,6 +72,7 @@ module tb_accel_top;
 	wire                    resp_fire = rd_resp_valid && rd_resp_ready;
 
 	integer L_H, L_W, L_C, L_F, L_KH, L_KW, L_P, L_S, L_RP, L_CH, L_OH, L_OW, L_M, L_G, L_ORP, L_OCH;
+	initial L_IW = 0;
 	integer errors, layers, small_vals, fd, total_cycles, total_ideal;
 	reg [8*32:1] fname;
 
@@ -96,7 +100,7 @@ module tb_accel_top;
 		forever begin
 			@(posedge clk);
 			if (wr_req_valid && wr_req_ready) begin
-				ext_mem[wr_req_addr] = wr_req_data;
+				ext_mem[wr_req_addr[15:0]] = wr_req_data;
 				wb_count = wb_count + 1;
 			end
 		end
@@ -104,7 +108,7 @@ module tb_accel_top;
 
 	assign rd_req_ready  = mem_on && rdy_r && (sq_count < 32);
 	assign rd_resp_valid = mem_on && (sq_count != 0) && (q_due[sq_head] <= cyc);
-	assign rd_resp_data  = ext_mem[q_addr[sq_head]];
+	assign rd_resp_data  = ext_mem[q_addr[sq_head][15:0]];
 
 	always @(posedge clk) begin
 		cyc   <= cyc + 1;
@@ -300,6 +304,7 @@ module tb_accel_top;
 			L_ORP = (L_OW + 3) / 4;
 			L_OCH = L_OH * L_ORP;
 			nbytes = 4 + ch * L_CH;
+			L_IW   = (nbytes + 3) / 4;
 
 			for (c = 0; c < ch; c = c + 1)
 				for (y = 0; y < h; y = y + 1)
@@ -375,8 +380,8 @@ module tb_accel_top;
 			in_w   = 8'(w);
 			in_c   = 8'(ch);
 			n_filt = 8'(nf);
-			k_h    = 3'(kh_);
-			k_w    = 3'(kw_);
+			k_h    = 4'(kh_);
+			k_w    = 4'(kw_);
 			pad    = 3'(p);
 			stride = 3'(s);
 			out_base = 11'd1;
@@ -410,16 +415,21 @@ module tb_accel_top;
 	task write_entry(input integer n_prog, input integer wbn);
 		integer i, a;
 		begin
+			// layer-table entry: 10 header fields, 6 sections, program, lookup table
 			a = TBL_EB;
 			ext_mem[a + 0] = {n_filt, in_c, in_w, in_h};
-			ext_mem[a + 1] = {13'd0, 1'b1, 1'b1, 1'b1, 2'd0, pool, stride, pad, k_w, k_h};   // last, write back, load image
-			ext_mem[a + 2] = {5'd0, out_base, wgt_ext_base};
-			ext_mem[a + 3] = {16'(WB_EB), img_ext_base};
-			ext_mem[a + 4] = {8'd0, 12'(wbn), 1'b0, 11'd0};                                 // count [23:12], source 0 [10:0]
-			ext_mem[a + 5] = {15'd0, 9'(n_lut_e), 1'b0, 7'(n_prog)};
-			for (i = 0; i < 6; i = i + 1) ext_mem[a + 6 + i] = {10'd0, 9'(sec_c[i]), 7'(sec_l[i]), 6'(sec_s[i])};
-			for (i = 0; i < n_prog; i = i + 1) ext_mem[a + 12 + i] = prg_v[i];
-			for (i = 0; i < (n_lut_e + 1) / 2; i = i + 1) ext_mem[a + 12 + n_prog + i] = {exp_tab[2 * i + 1], exp_tab[2 * i]};
+			ext_mem[a + 1] = {7'd0, 1'b1, (wbn != 0), 1'b1, pool, stride, pad, pad, pad, k_w, k_h};  // last, write back, load; pads top/bottom = pad
+			ext_mem[a + 2] = {8'd0, wgt_ext_base};
+			ext_mem[a + 3] = {9'(n_lut_e), 7'(n_prog), 5'd0, out_base};
+			ext_mem[a + 4] = {8'd0, img_ext_base};                                           // load: the whole image, one block
+			ext_mem[a + 5] = {11'd0, 1'b0, 8'd1, 12'(L_IW)};                                 // into buffer word 0
+			ext_mem[a + 6] = 32'd0;
+			ext_mem[a + 7] = 32'(WB_EB);                                                     // write-back: one block
+			ext_mem[a + 8] = {1'b0, 11'd0, 8'd1, 12'(wbn)};                                  // from buffer word 0
+			ext_mem[a + 9] = 32'd0;
+			for (i = 0; i < 6; i = i + 1) ext_mem[a + 10 + i] = {10'd0, 9'(sec_c[i]), 7'(sec_l[i]), 6'(sec_s[i])};
+			for (i = 0; i < n_prog; i = i + 1) ext_mem[a + 16 + i] = prg_v[i];
+			for (i = 0; i < (n_lut_e + 1) / 2; i = i + 1) ext_mem[a + 16 + n_prog + i] = {exp_tab[2 * i + 1], exp_tab[2 * i]};
 			for (i = 0; i < 1600; i = i + 1) ext_mem[WB_EB + i] = 32'hDEADBEEF;               // so missing writes show
 			wb_n = wbn;
 			tbl_base = TBL_EB;
@@ -810,10 +820,12 @@ module tb_accel_top;
 	endtask
 
 	task reject(input [7:0] h, input [7:0] w, input [7:0] ch, input [7:0] nf,
-	            input [2:0] kh_, input [2:0] kw_, input [2:0] p, input [2:0] s,
+	            input [3:0] kh_, input [3:0] kw_, input [2:0] p, input [2:0] s,
 	            input [10:0] obase, input integer bit_n, input [8*40:1] why);
 		integer t0, p0;
 		begin
+			L_IW = 1 + {24'd0, ch} * {24'd0, h} * (({24'd0, w} + 3) / 4);
+			if (L_IW > 4095) L_IW = 4095;
 			in_h = h; in_w = w; in_c = ch; n_filt = nf;
 			k_h = kh_; k_w = kw_; pad = p; stride = s; out_base = obase; pool = 2'd0;
 			img_ext_base = IMG_EB; wgt_ext_base = WGT_EB;
@@ -892,6 +904,14 @@ module tb_accel_top;
 		run(12, 12, 2, 4, 5, 5, 2, 1, 1);
 
 		$display("");
+		$display("1b) Kernels larger than 7 x 7 (up to 11 x 11), with padding up to 5:");
+		run(16, 16, 1, 4, 11, 11, 5, 1, 1);
+		run(31, 31, 3, 8, 11, 11, 2, 4, 1);                  // AlexNet-style: 11 x 11, stride 4
+		run(20, 24, 2, 6, 9, 11, 4, 2, 0);
+		run(14, 14, 8, 5, 11, 11, 0, 1, 0);                  // 8 x 121 = 968 weights per filter
+		run(12, 30, 1, 3, 8, 10, 7, 3, 0);                   // even kernels, padding 7
+
+		$display("");
 		$display("2) Stride 2, 3 and 4, uneven kernels, and the K = 1 and K = 2 cases (also with stride):");
 		run(14, 14, 4, 8, 3, 3, 1, 2, 1);
 		run(15, 15, 3, 6, 3, 3, 0, 2, 1);
@@ -910,9 +930,9 @@ module tb_accel_top;
 		$display("");
 		$display("3) 25 random layer shapes:");
 		for (n = 0; n < 25; n = n + 1) begin
-			rkh = 1 + {$random} % 5;
-			rkw = 1 + {$random} % 5;
-			rp  = {$random} % 4;
+			rkh = 1 + {$random} % 11;
+			rkw = 1 + {$random} % 11;
+			rp  = {$random} % 8;
 			if (rp >= rkh) rp = rkh - 1;
 			if (rp >= rkw) rp = rkw - 1;
 			rs  = 1 + {$random} % 4;
@@ -920,6 +940,9 @@ module tb_accel_top;
 			rw  = rkw + {$random} % 18;
 			rc  = 1 + {$random} % 6;
 			rf  = 1 + {$random} % 9;
+			while (rh > 32 || rw > 32) begin rh = rh - 1; rw = rw - 1; end
+			if (rh < rkh) rh = rkh;
+			if (rw < rkw) rw = rkw;
 			while (4 + rc * rh * ((rw + 3) / 4) * 4 > 6140) rc = rc - 1;
 			run(rh, rw, rc, rf, rkh, rkw, rp, rs, 0);
 		end
@@ -972,6 +995,8 @@ module tb_accel_top;
 		reject(8, 8, 1, 4, 0, 3, 0, 1, 1, 0, "zero kernel height              ");
 		reject(8, 8, 1, 4, 3, 3, 0, 5, 1, 1, "stride 5                        ");
 		reject(8, 8, 1, 4, 3, 3, 3, 1, 1, 2, "padding as large as the kernel  ");
+		reject(16, 16, 1, 4, 12, 3, 0, 1, 1, 0, "kernel 12 high (more than 11)   ");
+		reject(16, 16, 1, 4, 3, 15, 1, 1, 1, 0, "kernel 15 wide (more than 11)   ");
 		reject(2, 8, 1, 4, 5, 3, 0, 1, 1, 3, "kernel taller than the input    ");
 		reject(8, 8, 128, 4, 3, 3, 1, 1, 1, 4, "weights larger than 4 KB      ");
 		reject(32, 32, 8, 4, 3, 3, 1, 1, 1, 5, "image larger than 6 KB        ");
@@ -996,4 +1021,3 @@ module tb_accel_top;
 		$finish;
 	end
 endmodule
-

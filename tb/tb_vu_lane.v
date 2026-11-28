@@ -17,7 +17,7 @@ module tb_vu_lane;
 	localparam L_REQ    = 4'd11;
 	localparam L_SHRRV  = 4'd12;
 
-	reg                clk, rst_n, issue;
+	reg                clk, rst_n, issue, sat8, rand_sat;
 	reg         [3:0]  lop;
 	reg  signed [31:0] a, b, lo, hi;
 	reg         [4:0]  sh;
@@ -34,7 +34,7 @@ module tb_vu_lane;
 	integer            bad [0:12];
 
 	vu_lane dut (
-		.clk(clk), .rst_n(rst_n), .lop(lop), .issue(issue),
+		.clk(clk), .rst_n(rst_n), .lop(lop), .issue(issue), .req8(sat8),
 		.a(a), .b(b), .sh(sh), .mpos(mpos), .mneg(mneg), .s(s), .lo(lo), .hi(hi),
 		.r1(r1), .v1(v1), .r2(r2), .v2(v2)
 	);
@@ -157,6 +157,7 @@ module tb_vu_lane;
 			end
 
 			lop = op; a = x; b = y; sh = n; mpos = mp; mneg = mn; s = sv; lo = l; hi = h;
+			sat8 = rand_sat && (({$random} % 2) == 1);   // REQ .sat8 half of the time (ignored by other ops)
 			issue = 1'b1;
 			e2 = e2n; h2 = h2n; o2 = o2n;
 			h1  = (op != L_MUL && op != L_REQ);
@@ -165,6 +166,7 @@ module tb_vu_lane;
 			h2n = (op == L_MUL || op == L_REQ);
 			o2n = op;
 			e2n = ref_slow(op, x, y[15:0], mp, mn, sv);
+			if (op == L_REQ && sat8) e2n = (e2n < -128) ? -32'sd128 : ((e2n > 127) ? 32'sd127 : e2n);
 		end
 	endtask
 
@@ -193,7 +195,7 @@ module tb_vu_lane;
 			cnt[i] = 0;
 			bad[i] = 0;
 		end
-		issue = 1'b0; lop = 0; a = 0; b = 0; sh = 0; mpos = 0; mneg = 0; s = 0; lo = 0; hi = 0;
+		sat8 = 1'b0; rand_sat = 1'b0; issue = 1'b0; lop = 0; a = 0; b = 0; sh = 0; mpos = 0; mneg = 0; s = 0; lo = 0; hi = 0;
 		rst_n = 1'b0;
 		repeat (2) @(negedge clk);
 		rst_n = 1'b1;
@@ -214,6 +216,7 @@ module tb_vu_lane;
 
 		$display("");
 		$display("2) Random operations, issued back to back (fast and 2-cycle ops interleaved):");
+		rand_sat = 1'b1;
 		for (t = 0; t < NRAND; t = t + 1) begin
 			op_r = 4'({$random} % 13);
 			lo_r = rand32(1);
@@ -253,4 +256,3 @@ module tb_vu_lane;
 		$finish;
 	end
 endmodule
-
