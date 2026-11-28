@@ -655,3 +655,5 @@ timing (+0.87 ns slack at a 10 ns clock, pre-layout).
 - synthesis, place and route of the whole chip, and gate-level simulation of the network tests;
 - larger models: 8 KB feature buffers, and row-band tiling for maps of any size;
 - faster pooling, and kernels larger than 7 x 7.
+
+test test
